@@ -466,3 +466,13 @@ No Guarantees: This code is provided "AS IS", without any warranty or guarantee 
 Constructive criticism is welcome, but open hate towards the entire work is not welcome.
 
 If you're interested in the concept, feel free to explore, adapt, and contribute!
+
+---
+
+## Development Log
+
+You can follow the original development process and discussions here:
+
+[Discord Devlog Thread GPU Mode](https://discord.com/channels/1189498204333543425/1466534042768904356/1476227907327098931)
+
+Or find it on GPU Mode Server in channel: #from-scratch
