@@ -1,7 +1,7 @@
 
 # Quantum-inspired Trit Neural Network (QITNN)
 
-QITNN is a **quantum-inspired neural network architecture** implemented on top of **Serenade**, the author's custom DSL/compiler/runtime stack. The model runs on standard GPUs and does **not** require quantum hardware. The core idea is to represent each learnable projection with a **ternary superposition of amplitudes** and to propagate the resulting state through the network as a **full 2D simplex state**, rather than collapsing it to a single scalar observable.
+QITNN is a **quantum-inspired neural network architecture** implemented on top of **Serenade**, the author's custom DSL/compiler/runtime stack. The model runs on standard GPUs and does **not** require quantum hardware. The core idea is to represent each learnable projection with a **ternary superposition of amplitudes** and to propagate the resulting state through the network as a **full 2D simplex state**, rather than collapsing it to a single scalar observable
 
 In the current public implementation, the network is a **byte-level autoregressive Transformer-style model** with QTS (Quantum Ternary Superposition) projections in attention and feed-forward layers.
 
@@ -449,3 +449,16 @@ In short:
 
 That is the essence of the architecture.
 
+# DISCLAIMER
+
+This is an experimental MVP (Minimum Viable Product) created to demonstrate a novel concept (Quantum Trit Neural Network architecture).
+
+Development Context: This project was developed with the assistance of AI. The core architecture, mathematical formulas, debugging, and system integration are my own work.
+
+Hardware Specificity: The CUDA kernels are heavily optimized for my specific hardware (NVIDIA GeForce RTX 3060 Ti). They may contain bugs, perform poorly, or not work at all on other GPU architectures or configurations.
+
+No Guarantees: This code is provided "AS IS", without any warranty or guarantee of correctness, performance, or suitability for any purpose. It works on my machine. That's all I can promise.
+
+Constructive criticism is welcome, but open hate towards the entire work is not welcome.
+
+If you're interested in the concept, feel free to explore, adapt, and contribute!
