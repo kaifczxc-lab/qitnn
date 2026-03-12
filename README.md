@@ -5,8 +5,12 @@ QITNN is a **quantum-inspired neural network architecture** implemented on top o
 
 In the current public implementation, the network is a **byte-level autoregressive Transformer-style model** with QTS (Quantum Ternary Superposition) projections in attention and feed-forward layers.
 
-Based on Serenade Language
+---
+
+## Based on Serenade Language
+
 Official Document: [SERENADE_DOCS](https://github.com/kaifczxc-lab/Serenade-Language/blob/SiritoriProjects/Docs.md)
+
 ---
 
 ## What “quantum-inspired trit” means here
