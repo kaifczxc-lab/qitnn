@@ -476,3 +476,21 @@ You can follow the original development process and discussions here:
 [Discord Devlog Thread GPU Mode](https://discord.com/channels/1189498204333543425/1466534042768904356/1476227907327098931)
 
 Or find it on GPU Mode Server in channel: #from-scratch
+
+---
+
+# Known Limitations
+
+* Currently only 2 transformer layers are active
+
+* Dataset loading is limited to a single file, multi-file support in development
+
+* FFN dimension must be >= DIM
+
+* Top-k sampling uses a simplified heuristic and may be unstable
+
+* Generation currently restricted to ASCII range (32-126) for readability
+
+* Prompt length is capped at 64 tokens (context is 256)
+
+These are temporary limitations of the MVP, the core idea (2D simplex qutrit) works and trains
