@@ -423,22 +423,6 @@ This gives the network a richer internal representation than a single expected v
 
 ---
 
-## Relationship to Serenade
-
-QITNN is **based on Serenade**:
-
-- the model is written in the Serenade DSL,
-- the parser lowers `gpu ...` statements into concrete C++/CUDA runtime calls,
-- the runtime implements both standard neural network primitives and custom QTS kernels.
-
-So the project is best understood as:
-
-- **Serenade** as the language/runtime foundation,
-- **Quantum Trit Kernel** as the low-level QTS CUDA backend,
-- **QITNN** as the neural architecture built on top of both.
-
----
-
 ## Short summary
 
 QITNN is a quantum-inspired Transformer-style language model that replaces standard linear projections with ternary amplitude projections, applies Born-style normalization, and carries the resulting ternary state through the network as a **full centered 2D simplex state**.
