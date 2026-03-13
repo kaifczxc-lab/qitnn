@@ -1,0 +1,1237 @@
+# ============================================================
+# SerenaGPT-QTS v1.0 — Quantum Ternary Superposition Transformer
+# 2-layer, byte-level (VOCAB=256)
+# CHANGES v1.0 — real 2D simplex state + mild trit prior
+#   - Hidden/state lives in a centered 2D simplex basis [x | y]
+#   - x = P+ - P-
+#   - y = (2*P0 - P- - P+) / sqrt(3) = sqrt(3)*P0 - 1/sqrt(3)
+#   - The 3 pure states sit on an equilateral triangle, not on a fake gate axis
+#   - ff1 keeps the same shape idea, but now inside the symmetric basis
+#   - A tiny symmetric prior nudges each qutrit weight away from binary edges
+# Previous: raw [u | P0] basis made zero look like a special gate coordinate
+# ============================================================
+const VOCAB = 256
+const DIM = 384
+const FFN = 768
+const HDIM = DIM * 2
+const HFFN = FFN * 2
+const SEQ = 256
+const LAYERS = 2
+const MAX_TOK = 1048576
+const ENT_LAMBDA = 0.01
+const SIMPLEX_SQRT3 = 1.7320508
+const SIMPLEX_INV_SQRT3 = 0.57735026
+# Just an anti-collapse rail. Above this floor the prior goes fully silent.
+const TRIT_FLOOR_EFF = 2.12
+const TRIT_FLOOR_H = 1.0840643
+const TRIT_FLOOR_MUL_START = 0.01
+const TRIT_FLOOR_MUL_END = 0.001
+#const ZERO_BOOST = 3.5
+const ZERO_BOOST = 3.5
+const TEMPERATURE = 0.5
+const TOP_K = 8
+#=======================
+# basic settings
+#const EPOCHS = 3
+#const LR_START = 0.001
+#const LR_END = 0.0001
+#const DATASET_SIZE = 1073741824
+#const STEPS_PER_EPOCH = 25000
+#=======================
+# overfit test
+const EPOCHS = 50
+const LR_START = 0.005
+const LR_END = 0.001
+const DATASET_SIZE = 1048576
+const STEPS_PER_EPOCH = 1000
+#=======================
+emit "serenaQNN"
+emit "config: dim={DIM},ffn={FFN},seq={SEQ},layers={LAYERS},epochs={EPOCHS},lr-start={LR_START},lr-end={LR_END}, zero_boost={ZERO_BOOST}, ent_lambda={ENT_LAMBDA}, trit_floor_mul_start={TRIT_FLOOR_MUL_START}, trit_floor_mul_end={TRIT_FLOOR_MUL_END}"
+emit "core: psi_triplet (an, az, ap)"
+emit "fwd: hidden=[x|y] in centered simplex basis, attention is full 2D, ff1/ff2 stay 2D, ent={ENT_LAMBDA}, eff-floor={TRIT_FLOOR_EFF}, floor-step={TRIT_FLOOR_MUL_START}->{TRIT_FLOOR_MUL_END}"
+#=======================
+# 2d simplex scratch
+# u_tmp_* is still the signed x-axis
+# v_tmp_* is the raw P0 branch from qts_forward3
+# We recenter it into simplex-y only when packing the visible 2D state
+#=======================
+let u_tmp_dim = @f32[SEQ * DIM]
+let v_tmp_dim = @f32[SEQ * DIM]
+let u_tmp_ffn = @f32[SEQ * FFN]
+let v_tmp_ffn = @f32[SEQ * FFN]
+#=======================
+# weight arrays
+#=======================
+let tok_emb = @f32[VOCAB * HDIM]
+let pos_emb = @f32[SEQ * HDIM]
+#=======================
+# layer 0 qts weights
+#=======================
+let ln1_g0 = @f32[HDIM]
+let ln1_b0 = @f32[HDIM]
+let wq0_n = @f32[HDIM * DIM]
+let wq0_z = @f32[HDIM * DIM]
+let wq0_p = @f32[HDIM * DIM]
+let wk0_n = @f32[HDIM * DIM]
+let wk0_z = @f32[HDIM * DIM]
+let wk0_p = @f32[HDIM * DIM]
+let wv0_n = @f32[HDIM * DIM]
+let wv0_z = @f32[HDIM * DIM]
+let wv0_p = @f32[HDIM * DIM]
+let wo0_n = @f32[HDIM * DIM]
+let wo0_z = @f32[HDIM * DIM]
+let wo0_p = @f32[HDIM * DIM]
+let ln2_g0 = @f32[HDIM]
+let ln2_b0 = @f32[HDIM]
+let ff1_w0_n = @f32[HDIM * FFN]
+let ff1_w0_z = @f32[HDIM * FFN]
+let ff1_w0_p = @f32[HDIM * FFN]
+let ff2_w0_n = @f32[HFFN * DIM]
+let ff2_w0_z = @f32[HFFN * DIM]
+let ff2_w0_p = @f32[HFFN * DIM]
+#=======================
+# layer 1 qts weights
+#=======================
+let ln1_g1 = @f32[HDIM]
+let ln1_b1 = @f32[HDIM]
+let wq1_n = @f32[HDIM * DIM]
+let wq1_z = @f32[HDIM * DIM]
+let wq1_p = @f32[HDIM * DIM]
+let wk1_n = @f32[HDIM * DIM]
+let wk1_z = @f32[HDIM * DIM]
+let wk1_p = @f32[HDIM * DIM]
+let wv1_n = @f32[HDIM * DIM]
+let wv1_z = @f32[HDIM * DIM]
+let wv1_p = @f32[HDIM * DIM]
+let wo1_n = @f32[HDIM * DIM]
+let wo1_z = @f32[HDIM * DIM]
+let wo1_p = @f32[HDIM * DIM]
+let ln2_g1 = @f32[HDIM]
+let ln2_b1 = @f32[HDIM]
+let ff1_w1_n = @f32[HDIM * FFN]
+let ff1_w1_z = @f32[HDIM * FFN]
+let ff1_w1_p = @f32[HDIM * FFN]
+let ff2_w1_n = @f32[HFFN * DIM]
+let ff2_w1_z = @f32[HFFN * DIM]
+let ff2_w1_p = @f32[HFFN * DIM]
+#=======================
+# final layernorm
+#=======================
+let ln_f_g = @f32[HDIM]
+let ln_f_b = @f32[HDIM]
+#=======================
+# Output projection
+#=======================
+let out_w = @f32[HDIM * VOCAB]
+let out_b = @f32[VOCAB]
+#=======================
+# activations buffer
+#=======================
+let hidden = @f32[SEQ * HDIM]
+let residual = @f32[SEQ * HDIM]
+let ln_out = @f32[SEQ * HDIM]
+let Q = @f32[SEQ * DIM]
+let Qy = @f32[SEQ * DIM]
+let K = @f32[SEQ * DIM]
+let Ky = @f32[SEQ * DIM]
+let V = @f32[SEQ * DIM]
+let Vy = @f32[SEQ * DIM]
+let attn_out = @f32[SEQ * DIM]
+let attn_out_y = @f32[SEQ * DIM]
+let attn_pair = @f32[SEQ * HDIM]
+let proj_out = @f32[SEQ * HDIM]
+let ff_mid = @f32[SEQ * HFFN]
+let ff_out = @f32[SEQ * HDIM]
+let logits = @f32[SEQ * VOCAB]
+#=======================
+# layer 0 attention
+#=======================
+let cn_q_L0 = @f32[SEQ * DIM]
+let cz_q_L0 = @f32[SEQ * DIM]
+let cp_q_L0 = @f32[SEQ * DIM]
+let cn_k_L0 = @f32[SEQ * DIM]
+let cz_k_L0 = @f32[SEQ * DIM]
+let cp_k_L0 = @f32[SEQ * DIM]
+let cn_v_L0 = @f32[SEQ * DIM]
+let cz_v_L0 = @f32[SEQ * DIM]
+let cp_v_L0 = @f32[SEQ * DIM]
+let cn_o_L0 = @f32[SEQ * DIM]
+let cz_o_L0 = @f32[SEQ * DIM]
+let cp_o_L0 = @f32[SEQ * DIM]
+#=======================
+# Layer 0 ffn
+#=======================
+let cn_ff1_L0 = @f32[SEQ * FFN]
+let cz_ff1_L0 = @f32[SEQ * FFN]
+let cp_ff1_L0 = @f32[SEQ * FFN]
+let cn_ff2_L0 = @f32[SEQ * DIM]
+let cz_ff2_L0 = @f32[SEQ * DIM]
+let cp_ff2_L0 = @f32[SEQ * DIM]
+#=======================
+# Layer 1 attention
+#=======================
+let cn_q_L1 = @f32[SEQ * DIM]
+let cz_q_L1 = @f32[SEQ * DIM]
+let cp_q_L1 = @f32[SEQ * DIM]
+let cn_k_L1 = @f32[SEQ * DIM]
+let cz_k_L1 = @f32[SEQ * DIM]
+let cp_k_L1 = @f32[SEQ * DIM]
+let cn_v_L1 = @f32[SEQ * DIM]
+let cz_v_L1 = @f32[SEQ * DIM]
+let cp_v_L1 = @f32[SEQ * DIM]
+let cn_o_L1 = @f32[SEQ * DIM]
+let cz_o_L1 = @f32[SEQ * DIM]
+let cp_o_L1 = @f32[SEQ * DIM]
+#=======================
+# Layer 1 ffn
+#=======================
+let cn_ff1_L1 = @f32[SEQ * FFN]
+let cz_ff1_L1 = @f32[SEQ * FFN]
+let cp_ff1_L1 = @f32[SEQ * FFN]
+let cn_ff2_L1 = @f32[SEQ * DIM]
+let cz_ff2_L1 = @f32[SEQ * DIM]
+let cp_ff2_L1 = @f32[SEQ * DIM]
+#=======================
+# gradient buffers
+#=======================
+let d_hidden = @f32[SEQ * HDIM]
+let d_residual = @f32[SEQ * HDIM]
+let d_ln = @f32[SEQ * HDIM]
+let dQ = @f32[SEQ * DIM]
+let dQy = @f32[SEQ * DIM]
+let dK = @f32[SEQ * DIM]
+let dKy = @f32[SEQ * DIM]
+let dV = @f32[SEQ * DIM]
+let dVy = @f32[SEQ * DIM]
+let d_attn = @f32[SEQ * DIM]
+let d_attn_y = @f32[SEQ * DIM]
+let d_attn_pair = @f32[SEQ * HDIM]
+let d_attn_pair_tmp = @f32[SEQ * HDIM]
+let d_proj = @f32[SEQ * DIM]
+let d_ff_mid = @f32[SEQ * HFFN]
+let d_ff_out = @f32[SEQ * HDIM]
+let d_logits = @f32[SEQ * VOCAB]
+let d_ff_tmp = @f32[SEQ * HFFN]
+#=======================
+# per-channel gradient from backnorm
+#=======================
+let dc_neg = @f32[SEQ * FFN]
+let dc_zero = @f32[SEQ * FFN]
+let dc_pos = @f32[SEQ * FFN]
+#=======================
+# weight gradient temporaries
+#=======================
+let gw = @f32[HDIM * DIM]
+let gb = @f32[DIM]
+let gw_ff = @f32[HDIM * FFN]
+let gb_ff = @f32[FFN]
+let gw_ff2 = @f32[HFFN * DIM]
+let gb_ff2 = @f32[DIM]
+let g_ln_g = @f32[HDIM]
+let g_ln_b = @f32[HDIM]
+let gw_out = @f32[HDIM * VOCAB]
+let gb_out = @f32[VOCAB]
+#=======================
+# pre-norm saved for backprop
+#=======================
+let saved_pre_ln1_L0 = @f32[SEQ * HDIM]
+let saved_pre_ln2_L0 = @f32[SEQ * HDIM]
+let saved_pre_ff_L0 = @f32[SEQ * FFN]
+let saved_pre_ln1_L1 = @f32[SEQ * HDIM]
+let saved_pre_ln2_L1 = @f32[SEQ * HDIM]
+let saved_pre_ff_L1 = @f32[SEQ * FFN]
+#=======================
+# post-ln activations saved for linear backward
+#=======================
+let saved_post_ln1_L0 = @f32[SEQ * HDIM]
+let saved_post_ln1_L1 = @f32[SEQ * HDIM]
+let saved_post_ln2_L0 = @f32[SEQ * HDIM]
+let saved_post_ln2_L1 = @f32[SEQ * HDIM]
+let saved_ff_mid_L0 = @f32[SEQ * HFFN]
+#=======================
+# Layer 0 qvk/attn state saved
+#=======================
+let Q_L0 = @f32[SEQ * DIM]
+let Qy_L0 = @f32[SEQ * DIM]
+let K_L0 = @f32[SEQ * DIM]
+let Ky_L0 = @f32[SEQ * DIM]
+let V_L0 = @f32[SEQ * DIM]
+let Vy_L0 = @f32[SEQ * DIM]
+let attn_pair_L0 = @f32[SEQ * HDIM]
+#=======================
+# pre final ln hidden
+#=======================
+let saved_pre_final_ln = @f32[SEQ * HDIM]
+#=======================
+# Dataset buffer (preloaded into ram) & token buffers
+#=======================
+let dataset = @u8[DATASET_SIZE]
+let tokens = @f32[SEQ]
+let targets = @f32[SEQ]
+#=======================
+# init
+#=======================
+randinit tok_emb VOCAB * HDIM 42 0.02
+randinit pos_emb SEQ * HDIM 137 0.02
+cycle HDIM as d {
+    ln1_g0^[d] = 1.0
+    ln2_g0^[d] = 1.0
+    ln1_g1^[d] = 1.0
+    ln2_g1^[d] = 1.0
+    ln_f_g^[d] = 1.0
+}
+memfill ln1_b0 0.0 HDIM
+memfill ln2_b0 0.0 HDIM
+memfill ln1_b1 0.0 HDIM
+memfill ln2_b1 0.0 HDIM
+memfill ln_f_b 0.0 HDIM
+emit "initializing amplitudes"
+gpu qts_randinit wq0_n wq0_z wq0_p HDIM * DIM 271
+gpu qts_randinit wk0_n wk0_z wk0_p HDIM * DIM 397
+gpu qts_randinit wv0_n wv0_z wv0_p HDIM * DIM 521
+gpu qts_randinit wo0_n wo0_z wo0_p HDIM * DIM 643
+gpu qts_randinit ff1_w0_n ff1_w0_z ff1_w0_p HDIM * FFN 773
+gpu qts_randinit ff2_w0_n ff2_w0_z ff2_w0_p HFFN * DIM 907
+gpu qts_randinit wq1_n wq1_z wq1_p HDIM * DIM 1031
+gpu qts_randinit wk1_n wk1_z wk1_p HDIM * DIM 1151
+gpu qts_randinit wv1_n wv1_z wv1_p HDIM * DIM 1279
+gpu qts_randinit wo1_n wo1_z wo1_p HDIM * DIM 1409
+gpu qts_randinit ff1_w1_n ff1_w1_z ff1_w1_p HDIM * FFN 1543
+gpu qts_randinit ff2_w1_n ff2_w1_z ff2_w1_p HFFN * DIM 1669
+randinit out_w HDIM * VOCAB 1801 0.02
+memfill out_b 0.0 VOCAB
+emit "init complete"
+emit "pinning persistent qts raw buffers"
+gpu pin cn_q_L0 SEQ * DIM
+gpu pin cz_q_L0 SEQ * DIM
+gpu pin cp_q_L0 SEQ * DIM
+gpu pin cn_k_L0 SEQ * DIM
+gpu pin cz_k_L0 SEQ * DIM
+gpu pin cp_k_L0 SEQ * DIM
+gpu pin cn_v_L0 SEQ * DIM
+gpu pin cz_v_L0 SEQ * DIM
+gpu pin cp_v_L0 SEQ * DIM
+gpu pin cn_o_L0 SEQ * DIM
+gpu pin cz_o_L0 SEQ * DIM
+gpu pin cp_o_L0 SEQ * DIM
+gpu pin cn_ff1_L0 SEQ * FFN
+gpu pin cz_ff1_L0 SEQ * FFN
+gpu pin cp_ff1_L0 SEQ * FFN
+gpu pin cn_ff2_L0 SEQ * DIM
+gpu pin cz_ff2_L0 SEQ * DIM
+gpu pin cp_ff2_L0 SEQ * DIM
+gpu pin cn_q_L1 SEQ * DIM
+gpu pin cz_q_L1 SEQ * DIM
+gpu pin cp_q_L1 SEQ * DIM
+gpu pin cn_k_L1 SEQ * DIM
+gpu pin cz_k_L1 SEQ * DIM
+gpu pin cp_k_L1 SEQ * DIM
+gpu pin cn_v_L1 SEQ * DIM
+gpu pin cz_v_L1 SEQ * DIM
+gpu pin cp_v_L1 SEQ * DIM
+gpu pin cn_o_L1 SEQ * DIM
+gpu pin cz_o_L1 SEQ * DIM
+gpu pin cp_o_L1 SEQ * DIM
+gpu pin cn_ff1_L1 SEQ * FFN
+gpu pin cz_ff1_L1 SEQ * FFN
+gpu pin cp_ff1_L1 SEQ * FFN
+gpu pin cn_ff2_L1 SEQ * DIM
+gpu pin cz_ff2_L1 SEQ * DIM
+gpu pin cp_ff2_L1 SEQ * DIM
+emit "qts raw buffers pinned"
+emit "pinning QTS weight amplitudes on GPU..."
+# layer 0 weights
+gpu pin wq0_n HDIM * DIM
+gpu pin wq0_z HDIM * DIM
+gpu pin wq0_p HDIM * DIM
+gpu pin wk0_n HDIM * DIM
+gpu pin wk0_z HDIM * DIM
+gpu pin wk0_p HDIM * DIM
+gpu pin wv0_n HDIM * DIM
+gpu pin wv0_z HDIM * DIM
+gpu pin wv0_p HDIM * DIM
+gpu pin wo0_n HDIM * DIM
+gpu pin wo0_z HDIM * DIM
+gpu pin wo0_p HDIM * DIM
+gpu pin ff1_w0_n HDIM * FFN
+gpu pin ff1_w0_z HDIM * FFN
+gpu pin ff1_w0_p HDIM * FFN
+gpu pin ff2_w0_n HFFN * DIM
+gpu pin ff2_w0_z HFFN * DIM
+gpu pin ff2_w0_p HFFN * DIM
+# layer 1 weights
+gpu pin wq1_n HDIM * DIM
+gpu pin wq1_z HDIM * DIM
+gpu pin wq1_p HDIM * DIM
+gpu pin wk1_n HDIM * DIM
+gpu pin wk1_z HDIM * DIM
+gpu pin wk1_p HDIM * DIM
+gpu pin wv1_n HDIM * DIM
+gpu pin wv1_z HDIM * DIM
+gpu pin wv1_p HDIM * DIM
+gpu pin wo1_n HDIM * DIM
+gpu pin wo1_z HDIM * DIM
+gpu pin wo1_p HDIM * DIM
+gpu pin ff1_w1_n HDIM * FFN
+gpu pin ff1_w1_z HDIM * FFN
+gpu pin ff1_w1_p HDIM * FFN
+gpu pin ff2_w1_n HFFN * DIM
+gpu pin ff2_w1_z HFFN * DIM
+gpu pin ff2_w1_p HFFN * DIM
+# output projection & embeddings
+gpu pin out_w HDIM * VOCAB
+gpu pin tok_emb VOCAB * HDIM
+gpu pin pos_emb SEQ * HDIM
+emit "all weights + raw qts buffers pinned on GPU"
+#=======================
+# preloading dataset into ram
+#=======================
+files fc = scan "D:\so_data" "*.txt"
+emit "loading dataset into RAM ({DATASET_SIZE} bytes max)..."
+readfile data_len = load dataset 0 DATASET_SIZE
+emit "loaded {data_len} bytes zero file I/O during training"
+#=======================
+# training
+#=======================
+let total_steps = EPOCHS * STEPS_PER_EPOCH
+let step_num = 0
+let lr = LR_START
+cycle EPOCHS as ep {
+    let total_loss = 0.0
+    let n_samples = 0
+    cycle STEPS_PER_EPOCH as ii {
+        let frac = step_num + 0.0
+        let ftotal = total_steps + 0.0
+        lr = LR_START + (LR_END - LR_START) * (frac / ftotal)
+        let lr_zero = lr * ZERO_BOOST
+        let trit_floor_mul = TRIT_FLOOR_MUL_START + (TRIT_FLOOR_MUL_END - TRIT_FLOOR_MUL_START) * (frac / ftotal)
+        let trit_floor_step = lr * trit_floor_mul
+        step_num = step_num + 1
+        # Random crop from preloaded RAM — NO disk I/O
+        let max_start = data_len - SEQ - 1
+        let crop_hash = ii * 2971 + ep * 7919 + 13
+        if crop_hash < 0 {
+            crop_hash = 0 - crop_hash
+        }
+        let start = crop_hash % max_start
+        cycle SEQ as t {
+            tokens^[t] = dataset^[t + start]
+            targets^[t] = dataset^[t + start + 1]
+        }
+        # =======================
+        # forward pass
+        # hidden stores centered 
+        # simplex coords [x | y]
+        #=======================
+        gpu embed_lookup hidden tok_emb tokens SEQ HDIM VOCAB
+        gpu pos_add hidden pos_emb SEQ HDIM
+        #=======================
+        # layer 0
+        #=======================
+        gpu copy residual hidden SEQ * HDIM
+        gpu copy saved_pre_ln1_L0 hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln1_g0 ln1_b0 SEQ HDIM
+        gpu copy saved_post_ln1_L0 hidden SEQ * HDIM
+        #=======================
+        # Q,K,V are now honest 2D simplex signals.
+        #=======================
+        gpu qts_forward3 Q Qy cn_q_L0 cz_q_L0 cp_q_L0 hidden wq0_n wq0_z wq0_p SEQ HDIM DIM
+        gpu qts_forward3 K Ky cn_k_L0 cz_k_L0 cp_k_L0 hidden wk0_n wk0_z wk0_p SEQ HDIM DIM
+        gpu qts_forward3 V Vy cn_v_L0 cz_v_L0 cp_v_L0 hidden wv0_n wv0_z wv0_p SEQ HDIM DIM
+        cycle SEQ * DIM as j {
+            # what the fuck?
+            Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
+            Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
+            Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
+        }
+        gpu copy Q_L0 Q SEQ * DIM
+        gpu copy Qy_L0 Qy SEQ * DIM
+        gpu copy K_L0 K SEQ * DIM
+        gpu copy Ky_L0 Ky SEQ * DIM
+        gpu copy V_L0 V SEQ * DIM
+        gpu copy Vy_L0 Vy SEQ * DIM
+        gpu causal_attention2 Q Qy K Ky V Vy attn_out attn_out_y SEQ DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                attn_pair^[dst + d] = attn_out^[src + d]
+                attn_pair^[dst + DIM + d] = attn_out_y^[src + d]
+            }
+        }
+        gpu copy attn_pair_L0 attn_pair SEQ * HDIM
+        #=======================
+        # O projection returns the centered simplex 2D state [x | y]
+        #=======================
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_o_L0 cz_o_L0 cp_o_L0 attn_pair wo0_n wo0_z wo0_p SEQ HDIM DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                proj_out^[dst + d] = u_tmp_dim^[src + d]
+                proj_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + proj_out^[j]
+        }
+        gpu copy residual hidden SEQ * HDIM
+        gpu copy saved_pre_ln2_L0 hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln2_g0 ln2_b0 SEQ HDIM
+        gpu copy saved_post_ln2_L0 hidden SEQ * HDIM
+        #=======================
+        # ff1 expands into 2D FFN state [gelu(x) | y]
+        #=======================
+        gpu qts_forward3 u_tmp_ffn v_tmp_ffn cn_ff1_L0 cz_ff1_L0 cp_ff1_L0 hidden ff1_w0_n ff1_w0_z ff1_w0_p SEQ HDIM FFN
+        gpu copy saved_pre_ff_L0 u_tmp_ffn SEQ * FFN
+        gpu gelu u_tmp_ffn SEQ * FFN
+        cycle SEQ as t {
+            let src = t * FFN
+            let dst = t * HFFN
+            cycle FFN as d {
+                ff_mid^[dst + d] = u_tmp_ffn^[src + d]
+                ff_mid^[dst + FFN + d] = SIMPLEX_SQRT3 * v_tmp_ffn^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        gpu copy saved_ff_mid_L0 ff_mid SEQ * HFFN
+        #=======================
+        # ff2 projects the 2D FFN state back into the 2D hidden state
+        #=======================
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_ff2_L0 cz_ff2_L0 cp_ff2_L0 ff_mid ff2_w0_n ff2_w0_z ff2_w0_p SEQ HFFN DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                ff_out^[dst + d] = u_tmp_dim^[src + d]
+                ff_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + ff_out^[j]
+        }
+        #=======================
+        # layer 1
+        #=======================
+        gpu copy residual hidden SEQ * HDIM
+        gpu copy saved_pre_ln1_L1 hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln1_g1 ln1_b1 SEQ HDIM
+        gpu copy saved_post_ln1_L1 hidden SEQ * HDIM
+        gpu qts_forward3 Q Qy cn_q_L1 cz_q_L1 cp_q_L1 hidden wq1_n wq1_z wq1_p SEQ HDIM DIM
+        gpu qts_forward3 K Ky cn_k_L1 cz_k_L1 cp_k_L1 hidden wk1_n wk1_z wk1_p SEQ HDIM DIM
+        gpu qts_forward3 V Vy cn_v_L1 cz_v_L1 cp_v_L1 hidden wv1_n wv1_z wv1_p SEQ HDIM DIM
+        # 2D simplex
+        cycle SEQ * DIM as j {
+            Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
+            Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
+            Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
+        }
+        gpu causal_attention2 Q Qy K Ky V Vy attn_out attn_out_y SEQ DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                attn_pair^[dst + d] = attn_out^[src + d]
+                attn_pair^[dst + DIM + d] = attn_out_y^[src + d]
+            }
+        }
+        #=======================
+        # O projection returns the centered simplex 2D state [x | y]
+        #=======================
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_o_L1 cz_o_L1 cp_o_L1 attn_pair wo1_n wo1_z wo1_p SEQ HDIM DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                proj_out^[dst + d] = u_tmp_dim^[src + d]
+                proj_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + proj_out^[j]
+        }
+        gpu copy residual hidden SEQ * HDIM
+        gpu copy saved_pre_ln2_L1 hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln2_g1 ln2_b1 SEQ HDIM
+        gpu copy saved_post_ln2_L1 hidden SEQ * HDIM
+        #=======================
+        # ff1 expands into 2D FFN state [gelu(x) | y]
+        #=======================
+        gpu qts_forward3 u_tmp_ffn v_tmp_ffn cn_ff1_L1 cz_ff1_L1 cp_ff1_L1 hidden ff1_w1_n ff1_w1_z ff1_w1_p SEQ HDIM FFN
+        gpu copy saved_pre_ff_L1 u_tmp_ffn SEQ * FFN
+        gpu gelu u_tmp_ffn SEQ * FFN
+        cycle SEQ as t {
+            let src = t * FFN
+            let dst = t * HFFN
+            cycle FFN as d {
+                ff_mid^[dst + d] = u_tmp_ffn^[src + d]
+                ff_mid^[dst + FFN + d] = SIMPLEX_SQRT3 * v_tmp_ffn^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        #=======================
+        # ff2 projects the 2D FFN state back into the 2D hidden state
+        #=======================
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_ff2_L1 cz_ff2_L1 cp_ff2_L1 ff_mid ff2_w1_n ff2_w1_z ff2_w1_p SEQ HFFN DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                ff_out^[dst + d] = u_tmp_dim^[src + d]
+                ff_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + ff_out^[j]
+        }
+        #=======================
+        # final layernorm & output
+        #=======================
+        gpu copy saved_pre_final_ln hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln_f_g ln_f_b SEQ HDIM
+        gpu forward logits hidden out_w out_b SEQ HDIM VOCAB
+        #=======================
+        # loss func
+        #=======================
+        gpu celoss logits targets SEQ VOCAB
+        total_loss = total_loss + _sr_celoss
+        n_samples = n_samples + 1
+        #=======================
+        # backward pass logic
+        #=======================
+        # output projection backward
+        gpu backward hidden out_w logits gw_out gb_out d_hidden SEQ HDIM VOCAB
+        gpu sgd out_w gw_out lr HDIM * VOCAB
+        gpu sgd out_b gb_out lr VOCAB
+        # final layernorm backward
+        gpu layernorm_backward d_ln g_ln_g g_ln_b saved_pre_final_ln ln_f_g d_hidden SEQ HDIM
+        gpu sgd ln_f_g g_ln_g lr HDIM
+        gpu sgd ln_f_b g_ln_b lr HDIM
+        gpu copy d_hidden d_ln SEQ * HDIM
+        #=======================
+        # backprop layer 1 ffn | true 2d hidden
+        #=======================
+        gpu copy residual d_hidden SEQ * HDIM
+        # Hidden stores y = sqrt(3)*P0 - 1/sqrt(3), so dy has to be mapped back to dP0.
+        cycle SEQ as t {
+            let src = t * HDIM
+            let dst = t * DIM
+            cycle DIM as d {
+                d_proj^[dst + d] = d_hidden^[src + d]
+                d_attn^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
+            }
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn cn_ff2_L1 cz_ff2_L1 cp_ff2_L1 ENT_LAMBDA SEQ * DIM
+        if n_samples == 1 {
+            emit "  [L1 ff2 backnorm3 outputs:]"
+            gpu norm2 dc_neg SEQ * DIM "dc_neg"
+            gpu norm2 dc_zero SEQ * DIM "dc_zero"
+            gpu norm2 dc_pos SEQ * DIM "dc_pos"
+        }
+        gpu backward ff_mid ff2_w1_n dc_neg gw_ff2 gb_ff2 d_ff_mid SEQ HFFN DIM
+        if n_samples == 1 {
+            gpu norm2 gw_ff2 HFFN * DIM "L1_ff2_grad_n"
+        }
+        gpu sgd ff2_w1_n gw_ff2 lr HFFN * DIM
+        gpu backward ff_mid ff2_w1_z dc_zero gw_ff2 gb_ff2 d_ff_tmp SEQ HFFN DIM
+        if n_samples == 1 {
+            gpu norm2 gw_ff2 HFFN * DIM "L1_ff2_grad_z"
+        }
+        gpu sgd ff2_w1_z gw_ff2 lr_zero HFFN * DIM
+        cycle SEQ * HFFN as j {
+            d_ff_mid^[j] = d_ff_mid^[j] + d_ff_tmp^[j]
+        }
+        gpu backward ff_mid ff2_w1_p dc_pos gw_ff2 gb_ff2 d_ff_tmp SEQ HFFN DIM
+        gpu sgd ff2_w1_p gw_ff2 lr HFFN * DIM
+        cycle SEQ * HFFN as j {
+            d_ff_mid^[j] = d_ff_mid^[j] + d_ff_tmp^[j]
+        }
+        cycle SEQ as t {
+            let src = t * HFFN
+            let dst = t * FFN
+            cycle FFN as d {
+                u_tmp_ffn^[dst + d] = d_ff_mid^[src + d]
+                v_tmp_ffn^[dst + d] = SIMPLEX_SQRT3 * d_ff_mid^[src + FFN + d]
+            }
+        }
+        gpu gelu_backward u_tmp_ffn saved_pre_ff_L1 SEQ * FFN
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos u_tmp_ffn v_tmp_ffn cn_ff1_L1 cz_ff1_L1 cp_ff1_L1 ENT_LAMBDA SEQ * FFN
+        if n_samples == 1 {
+            emit "  [L1 ff1 backnorm3 outputs:]"
+            gpu norm2 dc_neg SEQ * FFN "dc_neg"
+            gpu norm2 dc_zero SEQ * FFN "dc_zero"
+            gpu norm2 dc_pos SEQ * FFN "dc_pos"
+        }
+        gpu backward saved_post_ln2_L1 ff1_w1_n dc_neg gw_ff gb_ff d_ln SEQ HDIM FFN
+        if n_samples == 1 {
+            gpu norm2 gw_ff HDIM * FFN "L1_ff1_grad_n"
+        }
+        gpu sgd ff1_w1_n gw_ff lr HDIM * FFN
+        gpu backward saved_post_ln2_L1 ff1_w1_z dc_zero gw_ff gb_ff d_residual SEQ HDIM FFN
+        if n_samples == 1 {
+            gpu norm2 gw_ff HDIM * FFN "L1_ff1_grad_z"
+        }
+        gpu sgd ff1_w1_z gw_ff lr_zero HDIM * FFN
+        cycle SEQ * HDIM as j {
+            d_ln^[j] = d_ln^[j] + d_residual^[j]
+        }
+        gpu backward saved_post_ln2_L1 ff1_w1_p dc_pos gw_ff gb_ff d_residual SEQ HDIM FFN
+        gpu sgd ff1_w1_p gw_ff lr HDIM * FFN
+        cycle SEQ * HDIM as j {
+            d_ln^[j] = d_ln^[j] + d_residual^[j]
+        }
+        gpu layernorm_backward d_residual g_ln_g g_ln_b saved_pre_ln2_L1 ln2_g1 d_ln SEQ HDIM
+        gpu sgd ln2_g1 g_ln_g lr HDIM
+        gpu sgd ln2_b1 g_ln_b lr HDIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = residual^[j] + d_residual^[j]
+        }
+        gpu copy residual d_hidden SEQ * HDIM
+        cycle SEQ as t {
+            let src = t * HDIM
+            let dst = t * DIM
+            cycle DIM as d {
+                d_proj^[dst + d] = d_hidden^[src + d]
+                d_attn_y^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
+            }
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn_y cn_o_L1 cz_o_L1 cp_o_L1 ENT_LAMBDA SEQ * DIM
+        gpu backward attn_pair wo1_n dc_neg gw gb d_attn_pair SEQ HDIM DIM
+        gpu sgd wo1_n gw lr HDIM * DIM
+        gpu backward attn_pair wo1_z dc_zero gw gb d_attn_pair_tmp SEQ HDIM DIM
+        gpu sgd wo1_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_attn_pair^[j] = d_attn_pair^[j] + d_attn_pair_tmp^[j]
+        }
+        gpu backward attn_pair wo1_p dc_pos gw gb d_attn_pair_tmp SEQ HDIM DIM
+        gpu sgd wo1_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_attn_pair^[j] = d_attn_pair^[j] + d_attn_pair_tmp^[j]
+        }
+        cycle SEQ as t {
+            let src = t * HDIM
+            let dst = t * DIM
+            cycle DIM as d {
+                d_attn^[dst + d] = d_attn_pair^[src + d]
+                d_attn_y^[dst + d] = d_attn_pair^[src + DIM + d]
+            }
+        }
+        gpu attention_backward2 dQ dQy dK dKy dV dVy Q Qy K Ky V Vy d_attn d_attn_y SEQ DIM
+        cycle SEQ * DIM as j {
+            dQy^[j] = SIMPLEX_SQRT3 * dQy^[j]
+            dKy^[j] = SIMPLEX_SQRT3 * dKy^[j]
+            dVy^[j] = SIMPLEX_SQRT3 * dVy^[j]
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dQ dQy cn_q_L1 cz_q_L1 cp_q_L1 ENT_LAMBDA SEQ * DIM
+        gpu backward saved_post_ln1_L1 wq1_n dc_neg gw gb d_ln SEQ HDIM DIM
+        gpu sgd wq1_n gw lr HDIM * DIM
+        gpu copy d_hidden d_ln SEQ * HDIM
+        gpu backward saved_post_ln1_L1 wq1_z dc_zero gw gb d_ln SEQ HDIM DIM
+        gpu sgd wq1_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L1 wq1_p dc_pos gw gb d_ln SEQ HDIM DIM
+        gpu sgd wq1_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dK dKy cn_k_L1 cz_k_L1 cp_k_L1 ENT_LAMBDA SEQ * DIM
+        gpu backward saved_post_ln1_L1 wk1_n dc_neg gw gb d_ln SEQ HDIM DIM
+        gpu sgd wk1_n gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L1 wk1_z dc_zero gw gb d_ln SEQ HDIM DIM
+        gpu sgd wk1_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L1 wk1_p dc_pos gw gb d_ln SEQ HDIM DIM
+        gpu sgd wk1_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dV dVy cn_v_L1 cz_v_L1 cp_v_L1 ENT_LAMBDA SEQ * DIM
+        gpu backward saved_post_ln1_L1 wv1_n dc_neg gw gb d_ln SEQ HDIM DIM
+        gpu sgd wv1_n gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L1 wv1_z dc_zero gw gb d_ln SEQ HDIM DIM
+        gpu sgd wv1_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L1 wv1_p dc_pos gw gb d_ln SEQ HDIM DIM
+        gpu sgd wv1_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu layernorm_backward d_residual g_ln_g g_ln_b saved_pre_ln1_L1 ln1_g1 d_hidden SEQ HDIM
+        gpu sgd ln1_g1 g_ln_g lr HDIM
+        gpu sgd ln1_b1 g_ln_b lr HDIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = residual^[j] + d_residual^[j]
+        }
+        # ---- Backprop Layer 0 FFN (true 2D hidden) ----
+        gpu copy residual d_hidden SEQ * HDIM
+        cycle SEQ as t {
+            let src = t * HDIM
+            let dst = t * DIM
+            cycle DIM as d {
+                d_proj^[dst + d] = d_hidden^[src + d]
+                d_attn^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
+            }
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn cn_ff2_L0 cz_ff2_L0 cp_ff2_L0 ENT_LAMBDA SEQ * DIM
+        gpu backward saved_ff_mid_L0 ff2_w0_n dc_neg gw_ff2 gb_ff2 d_ff_mid SEQ HFFN DIM
+        gpu sgd ff2_w0_n gw_ff2 lr HFFN * DIM
+        gpu backward saved_ff_mid_L0 ff2_w0_z dc_zero gw_ff2 gb_ff2 d_ff_tmp SEQ HFFN DIM
+        gpu sgd ff2_w0_z gw_ff2 lr_zero HFFN * DIM
+        cycle SEQ * HFFN as j {
+            d_ff_mid^[j] = d_ff_mid^[j] + d_ff_tmp^[j]
+        }
+        gpu backward saved_ff_mid_L0 ff2_w0_p dc_pos gw_ff2 gb_ff2 d_ff_tmp SEQ HFFN DIM
+        gpu sgd ff2_w0_p gw_ff2 lr HFFN * DIM
+        cycle SEQ * HFFN as j {
+            d_ff_mid^[j] = d_ff_mid^[j] + d_ff_tmp^[j]
+        }
+        cycle SEQ as t {
+            let src = t * HFFN
+            let dst = t * FFN
+            cycle FFN as d {
+                u_tmp_ffn^[dst + d] = d_ff_mid^[src + d]
+                v_tmp_ffn^[dst + d] = SIMPLEX_SQRT3 * d_ff_mid^[src + FFN + d]
+            }
+        }
+        gpu gelu_backward u_tmp_ffn saved_pre_ff_L0 SEQ * FFN
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos u_tmp_ffn v_tmp_ffn cn_ff1_L0 cz_ff1_L0 cp_ff1_L0 ENT_LAMBDA SEQ * FFN
+        gpu backward saved_post_ln2_L0 ff1_w0_n dc_neg gw_ff gb_ff d_ln SEQ HDIM FFN
+        gpu sgd ff1_w0_n gw_ff lr HDIM * FFN
+        gpu backward saved_post_ln2_L0 ff1_w0_z dc_zero gw_ff gb_ff d_residual SEQ HDIM FFN
+        gpu sgd ff1_w0_z gw_ff lr_zero HDIM * FFN
+        cycle SEQ * HDIM as j {
+            d_ln^[j] = d_ln^[j] + d_residual^[j]
+        }
+        gpu backward saved_post_ln2_L0 ff1_w0_p dc_pos gw_ff gb_ff d_residual SEQ HDIM FFN
+        gpu sgd ff1_w0_p gw_ff lr HDIM * FFN
+        cycle SEQ * HDIM as j {
+            d_ln^[j] = d_ln^[j] + d_residual^[j]
+        }
+        gpu layernorm_backward d_residual g_ln_g g_ln_b saved_pre_ln2_L0 ln2_g0 d_ln SEQ HDIM
+        gpu sgd ln2_g0 g_ln_g lr HDIM
+        gpu sgd ln2_b0 g_ln_b lr HDIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = residual^[j] + d_residual^[j]
+        }
+        #=======================
+        # backprop layer 0 attention | true 2d hidden
+        #=======================
+        gpu copy residual d_hidden SEQ * HDIM
+        cycle SEQ as t {
+            let src = t * HDIM
+            let dst = t * DIM
+            cycle DIM as d {
+                d_proj^[dst + d] = d_hidden^[src + d]
+                d_attn_y^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
+            }
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn_y cn_o_L0 cz_o_L0 cp_o_L0 ENT_LAMBDA SEQ * DIM
+        gpu backward attn_pair_L0 wo0_n dc_neg gw gb d_attn_pair SEQ HDIM DIM
+        gpu sgd wo0_n gw lr HDIM * DIM
+        gpu backward attn_pair_L0 wo0_z dc_zero gw gb d_attn_pair_tmp SEQ HDIM DIM
+        gpu sgd wo0_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_attn_pair^[j] = d_attn_pair^[j] + d_attn_pair_tmp^[j]
+        }
+        gpu backward attn_pair_L0 wo0_p dc_pos gw gb d_attn_pair_tmp SEQ HDIM DIM
+        gpu sgd wo0_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_attn_pair^[j] = d_attn_pair^[j] + d_attn_pair_tmp^[j]
+        }
+        cycle SEQ as t {
+            let src = t * HDIM
+            let dst = t * DIM
+            cycle DIM as d {
+                d_attn^[dst + d] = d_attn_pair^[src + d]
+                d_attn_y^[dst + d] = d_attn_pair^[src + DIM + d]
+            }
+        }
+        gpu attention_backward2 dQ dQy dK dKy dV dVy Q_L0 Qy_L0 K_L0 Ky_L0 V_L0 Vy_L0 d_attn d_attn_y SEQ DIM
+        cycle SEQ * DIM as j {
+            dQy^[j] = SIMPLEX_SQRT3 * dQy^[j]
+            dKy^[j] = SIMPLEX_SQRT3 * dKy^[j]
+            dVy^[j] = SIMPLEX_SQRT3 * dVy^[j]
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dQ dQy cn_q_L0 cz_q_L0 cp_q_L0 ENT_LAMBDA SEQ * DIM
+        gpu backward saved_post_ln1_L0 wq0_n dc_neg gw gb d_ln SEQ HDIM DIM
+        gpu sgd wq0_n gw lr HDIM * DIM
+        gpu copy d_hidden d_ln SEQ * HDIM
+        gpu backward saved_post_ln1_L0 wq0_z dc_zero gw gb d_ln SEQ HDIM DIM
+        gpu sgd wq0_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L0 wq0_p dc_pos gw gb d_ln SEQ HDIM DIM
+        gpu sgd wq0_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dK dKy cn_k_L0 cz_k_L0 cp_k_L0 ENT_LAMBDA SEQ * DIM
+        gpu backward saved_post_ln1_L0 wk0_n dc_neg gw gb d_ln SEQ HDIM DIM
+        gpu sgd wk0_n gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L0 wk0_z dc_zero gw gb d_ln SEQ HDIM DIM
+        gpu sgd wk0_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L0 wk0_p dc_pos gw gb d_ln SEQ HDIM DIM
+        gpu sgd wk0_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dV dVy cn_v_L0 cz_v_L0 cp_v_L0 ENT_LAMBDA SEQ * DIM
+        gpu backward saved_post_ln1_L0 wv0_n dc_neg gw gb d_ln SEQ HDIM DIM
+        gpu sgd wv0_n gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L0 wv0_z dc_zero gw gb d_ln SEQ HDIM DIM
+        gpu sgd wv0_z gw lr_zero HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu backward saved_post_ln1_L0 wv0_p dc_pos gw gb d_ln SEQ HDIM DIM
+        gpu sgd wv0_p gw lr HDIM * DIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = d_hidden^[j] + d_ln^[j]
+        }
+        gpu layernorm_backward d_residual g_ln_g g_ln_b saved_pre_ln1_L0 ln1_g0 d_hidden SEQ HDIM
+        gpu sgd ln1_g0 g_ln_g lr HDIM
+        gpu sgd ln1_b0 g_ln_b lr HDIM
+        cycle SEQ * HDIM as j {
+            d_hidden^[j] = residual^[j] + d_residual^[j]
+        }
+        #=======================
+        # update embeddings func
+        #=======================
+        gpu embed_backward tok_emb tokens d_hidden SEQ HDIM VOCAB lr
+        gpu sgd pos_emb d_hidden lr SEQ * HDIM
+        # soft entropy floor on qutrit weights
+        # it only pushes when a triplet starts collapsing below the chosen eff floor
+        gpu qts_prior wq0_n wq0_z wq0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wk0_n wk0_z wk0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wv0_n wv0_z wv0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wo0_n wo0_z wo0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior ff1_w0_n ff1_w0_z ff1_w0_p trit_floor_step TRIT_FLOOR_H HDIM * FFN
+        gpu qts_prior ff2_w0_n ff2_w0_z ff2_w0_p trit_floor_step TRIT_FLOOR_H HFFN * DIM
+        gpu qts_prior wq1_n wq1_z wq1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wk1_n wk1_z wk1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wv1_n wv1_z wv1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wo1_n wo1_z wo1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior ff1_w1_n ff1_w1_z ff1_w1_p trit_floor_step TRIT_FLOOR_H HDIM * FFN
+        gpu qts_prior ff2_w1_n ff2_w1_z ff2_w1_p trit_floor_step TRIT_FLOOR_H HFFN * DIM
+        if n_samples % 500 == 0 {
+            emit "  [{n_samples}] loss={total_loss / n_samples}  lr={lr}"
+        }
+    }
+    emit "epoch {ep + 1}/{EPOCHS}  avg_loss={total_loss / (n_samples + 1)}  samples={n_samples}"
+    #=======================
+    # qts full health diagnostic
+    # always log l1 ff1 & ff2, rest only every 10 epochs
+    #=======================
+    emit "  [L1 ff1] (epoch {ep + 1})"
+    gpu qts_diag ff1_w1_n ff1_w1_z ff1_w1_p HDIM * FFN
+    emit "  [L1 ff2] (epoch {ep + 1})"
+    gpu qts_diag ff2_w1_n ff2_w1_z ff2_w1_p HFFN * DIM
+    if (ep + 1) % 10 == 0 {
+        emit "qts diagnostic every 10 epochs (epoch {ep + 1}) ==="
+        emit "  [L0 wq]"
+        gpu qts_diag wq0_n wq0_z wq0_p HDIM * DIM
+        emit "  [L0 wk]"
+        gpu qts_diag wk0_n wk0_z wk0_p HDIM * DIM
+        emit "  [L0 wv]"
+        gpu qts_diag wv0_n wv0_z wv0_p HDIM * DIM
+        emit "  [L0 wo]"
+        gpu qts_diag wo0_n wo0_z wo0_p HDIM * DIM
+        emit "  [L0 ff1]"
+        gpu qts_diag ff1_w0_n ff1_w0_z ff1_w0_p HDIM * FFN
+        emit "  [L0 ff2]"
+        gpu qts_diag ff2_w0_n ff2_w0_z ff2_w0_p HFFN * DIM
+        emit "  [L1 wq]"
+        gpu qts_diag wq1_n wq1_z wq1_p HDIM * DIM
+        emit "  [L1 wk]"
+        gpu qts_diag wk1_n wk1_z wk1_p HDIM * DIM
+        emit "  [L1 wv]"
+        gpu qts_diag wv1_n wv1_z wv1_p HDIM * DIM
+        emit "  [L1 wo]"
+        gpu qts_diag wo1_n wo1_z wo1_p HDIM * DIM
+    }
+}
+emit "Enter text to get answer or write exit to get exit"
+emit ""
+let gen_buf = @f32[SEQ]
+str_from_bytes gen_result gen_buf 0
+let plen = 0
+let gen_pos = 0
+while 1 == 1 {
+    prompt q "> "
+    if q == "exit" {
+        break
+    }
+    if q == "" {
+        continue
+    }
+    str_bytes plen = str_bytes gen_buf q SEQ
+    if plen < 1 {
+        continue
+    }
+    gen_pos = plen
+    if gen_pos > 64 {
+        gen_pos = 64
+    }
+    let max_gen = SEQ - 1
+    cycle max_gen as step {
+        if gen_pos >= SEQ {
+            break
+        }
+        gpu embed_lookup hidden tok_emb gen_buf gen_pos HDIM VOCAB
+        gpu pos_add hidden pos_emb gen_pos HDIM
+        #=======================
+        # layer 0 centered simplex 2D state
+        #=======================
+        gpu copy residual hidden gen_pos * HDIM
+        gpu layernorm_batch hidden ln1_g0 ln1_b0 gen_pos HDIM
+        gpu qts_forward3 Q Qy cn_q_L0 cz_q_L0 cp_q_L0 hidden wq0_n wq0_z wq0_p gen_pos HDIM DIM
+        gpu qts_forward3 K Ky cn_k_L0 cz_k_L0 cp_k_L0 hidden wk0_n wk0_z wk0_p gen_pos HDIM DIM
+        gpu qts_forward3 V Vy cn_v_L0 cz_v_L0 cp_v_L0 hidden wv0_n wv0_z wv0_p gen_pos HDIM DIM
+        cycle gen_pos * DIM as j {
+            Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
+            Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
+            Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
+        }
+        gpu causal_attention2 Q Qy K Ky V Vy attn_out attn_out_y gen_pos DIM
+        cycle gen_pos as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                attn_pair^[dst + d] = attn_out^[src + d]
+                attn_pair^[dst + DIM + d] = attn_out_y^[src + d]
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_o_L0 cz_o_L0 cp_o_L0 attn_pair wo0_n wo0_z wo0_p gen_pos HDIM DIM
+        cycle gen_pos as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                proj_out^[dst + d] = u_tmp_dim^[src + d]
+                proj_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle gen_pos * HDIM as j {
+            hidden^[j] = residual^[j] + proj_out^[j]
+        }
+        gpu copy residual hidden gen_pos * HDIM
+        gpu layernorm_batch hidden ln2_g0 ln2_b0 gen_pos HDIM
+        gpu qts_forward3 u_tmp_ffn v_tmp_ffn cn_ff1_L0 cz_ff1_L0 cp_ff1_L0 hidden ff1_w0_n ff1_w0_z ff1_w0_p gen_pos HDIM FFN
+        gpu gelu u_tmp_ffn gen_pos * FFN
+        cycle gen_pos as t {
+            let src = t * FFN
+            let dst = t * HFFN
+            cycle FFN as d {
+                ff_mid^[dst + d] = u_tmp_ffn^[src + d]
+                ff_mid^[dst + FFN + d] = SIMPLEX_SQRT3 * v_tmp_ffn^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_ff2_L0 cz_ff2_L0 cp_ff2_L0 ff_mid ff2_w0_n ff2_w0_z ff2_w0_p gen_pos HFFN DIM
+        cycle gen_pos as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                ff_out^[dst + d] = u_tmp_dim^[src + d]
+                ff_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle gen_pos * HDIM as j {
+            hidden^[j] = residual^[j] + ff_out^[j]
+        }
+        #=======================
+        # layer 1 centered simplex 2D state
+        #=======================
+        gpu copy residual hidden gen_pos * HDIM
+        gpu layernorm_batch hidden ln1_g1 ln1_b1 gen_pos HDIM
+        gpu qts_forward3 Q Qy cn_q_L1 cz_q_L1 cp_q_L1 hidden wq1_n wq1_z wq1_p gen_pos HDIM DIM
+        gpu qts_forward3 K Ky cn_k_L1 cz_k_L1 cp_k_L1 hidden wk1_n wk1_z wk1_p gen_pos HDIM DIM
+        gpu qts_forward3 V Vy cn_v_L1 cz_v_L1 cp_v_L1 hidden wv1_n wv1_z wv1_p gen_pos HDIM DIM
+        cycle gen_pos * DIM as j {
+            Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
+            Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
+            Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
+        }
+        gpu causal_attention2 Q Qy K Ky V Vy attn_out attn_out_y gen_pos DIM
+        cycle gen_pos as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                attn_pair^[dst + d] = attn_out^[src + d]
+                attn_pair^[dst + DIM + d] = attn_out_y^[src + d]
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_o_L1 cz_o_L1 cp_o_L1 attn_pair wo1_n wo1_z wo1_p gen_pos HDIM DIM
+        cycle gen_pos as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                proj_out^[dst + d] = u_tmp_dim^[src + d]
+                proj_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle gen_pos * HDIM as j {
+            hidden^[j] = residual^[j] + proj_out^[j]
+        }
+        gpu copy residual hidden gen_pos * HDIM
+        gpu layernorm_batch hidden ln2_g1 ln2_b1 gen_pos HDIM
+        gpu qts_forward3 u_tmp_ffn v_tmp_ffn cn_ff1_L1 cz_ff1_L1 cp_ff1_L1 hidden ff1_w1_n ff1_w1_z ff1_w1_p gen_pos HDIM FFN
+        gpu gelu u_tmp_ffn gen_pos * FFN
+        cycle gen_pos as t {
+            let src = t * FFN
+            let dst = t * HFFN
+            cycle FFN as d {
+                ff_mid^[dst + d] = u_tmp_ffn^[src + d]
+                ff_mid^[dst + FFN + d] = SIMPLEX_SQRT3 * v_tmp_ffn^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_ff2_L1 cz_ff2_L1 cp_ff2_L1 ff_mid ff2_w1_n ff2_w1_z ff2_w1_p gen_pos HFFN DIM
+        cycle gen_pos as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                ff_out^[dst + d] = u_tmp_dim^[src + d]
+                ff_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle gen_pos * HDIM as j {
+            hidden^[j] = residual^[j] + ff_out^[j]
+        }
+        #=======================
+        # final ln & output logits
+        #=======================
+        gpu layernorm_batch hidden ln_f_g ln_f_b gen_pos HDIM
+        gpu forward logits hidden out_w out_b gen_pos HDIM VOCAB
+        #=======================
+        # temp sampling with softmax
+        #=======================
+        let last_off = (gen_pos - 1) * VOCAB
+        #=======================
+        # mask non-printable tokens: only allow 0(EOS), 9(tab), 10(newline), 32-126(ASCII)
+        #=======================
+        cycle VOCAB as v {
+            if v < 32 {
+                if v != 0 {
+                    if v != 9 {
+                        if v != 10 {
+                            logits^[last_off + v] = -1000.0
+                        }
+                    }
+                }
+            }
+            if v > 126 {
+                logits^[last_off + v] = -1000.0
+            }
+        }
+        #=======================
+        # topk keep only TOP_K best logits, mask rest        
+        #=======================
+        # 1) find top-k by iterative max & suppress
+        cycle TOP_K as tk_round {
+            let tk_best = -1000.0
+            let tk_idx = 0
+            cycle VOCAB as v {
+                if logits^[last_off + v] > tk_best {
+                    tk_best = logits^[last_off + v]
+                    tk_idx = v
+                }
+            }
+            logits^[last_off + tk_idx] = logits^[last_off + tk_idx] - 10000.0
+        }
+        #=======================
+        # 2) restore top-k (< -5000 = was selected), mask everything else
+        #=======================
+        cycle VOCAB as v {
+            let is_topk = 0
+            if logits^[last_off + v] < -5000.0 {
+                logits^[last_off + v] = logits^[last_off + v] + 10000.0
+                is_topk = 1
+            }
+            if is_topk == 0 {
+                logits^[last_off + v] = -1000.0
+            }
+        }
+        #=======================
+        # Find max logit for numerical stability
+        #=======================
+        let max_logit = logits^[last_off]
+        cycle VOCAB as v {
+            if logits^[last_off + v] > max_logit {
+                max_logit = logits^[last_off + v]
+            }
+        }
+        #=======================
+        # Compute exp((logit - max) / temperature) using (1+x/256)^256
+        #=======================
+        let exp_sum = 0.0
+        cycle VOCAB as v {
+            let scaled = (logits^[last_off + v] - max_logit) / TEMPERATURE
+            if scaled < -80.0 {
+                scaled = -80.0
+            }
+            let ex = 1.0 + scaled / 256.0
+            if ex < 0.0 {
+                ex = 0.0
+            }
+            ex = ex * ex
+            ex = ex * ex
+            ex = ex * ex
+            ex = ex * ex
+            ex = ex * ex
+            ex = ex * ex
+            ex = ex * ex
+            ex = ex * ex
+            logits^[last_off + v] = ex
+            exp_sum = exp_sum + ex
+        }
+        #=======================
+        # Sample from distribution using improved hash RNG (xorshift-mix)
+        #=======================
+        let sample_hash = gen_pos * 2654435761 + step * 2246822519 + 13
+        sample_hash = sample_hash * 1597334677
+        if sample_hash < 0 {
+            sample_hash = 0 - sample_hash
+        }
+        let rand_val = (sample_hash % 100000) / 100000.0
+        let cumsum = 0.0
+        let chosen = -1
+        cycle VOCAB as v {
+            if chosen < 0 {
+                cumsum = cumsum + logits^[last_off + v] / exp_sum
+                if cumsum > rand_val {
+                    chosen = v
+                }
+            }
+        }
+        if chosen < 0 {
+            chosen = 0
+        }
+        gen_buf^[gen_pos] = chosen + 0.0
+        gen_pos = gen_pos + 1
+        if chosen == 0 {
+            break
+        }
+    }
+    str_from_bytes gen_result gen_buf gen_pos
+    emit "{gen_result}"
+    emit ""
+}
+emit "bye!"
