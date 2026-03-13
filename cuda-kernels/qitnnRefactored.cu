@@ -2,7 +2,7 @@
 Readable CUDA QITNN Code
 This is a refactored version of the kernel used in the experiments. For the exact original code check qitnn/cuda-kernels/qitnnRaw
 This code can be run with the command
-nvcc -O3 -std=c++17 qitnnRefactored -o qitnnRefactored
+nvcc -O3 -std=c++17 qitnnRefactored.ci -o qitnnRefactored
 in the X64 Native Tools Command Prompt for VS 2022
 I tested the code with the following results:
 ===================================================
