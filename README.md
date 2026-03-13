@@ -7,9 +7,13 @@ In the current public implementation, the network is a **byte-level autoregressi
 
 ---
 
-## Based on Serenade Language
+## Links
 
-Official Document: [SERENADE_DOCS](https://github.com/kaifczxc-lab/Serenade-Language/blob/SiritoriProjects/Docs.md)
+Analysis of Architecture V1: [Analysis](https://github.com/kaifczxc-lab/qitnn/blob/SiritoriProjects/Analysis-QITNN.md)
+
+Original Devlog: [Discord Devlog Thread GPU Mode](https://discord.com/channels/1189498204333543425/1466534042768904356/1476227907327098931)
+
+Serenade Language Docs: [SERENADE_DOCS](https://github.com/kaifczxc-lab/Serenade-Language/blob/SiritoriProjects/Docs.md)
 
 ---
 
