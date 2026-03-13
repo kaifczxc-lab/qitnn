@@ -4,6 +4,7 @@
 QITNN is a **quantum-inspired neural network architecture** implemented on top of **Serenade**, the author's custom DSL/compiler/runtime stack. The model runs on standard GPUs and does **not** require quantum hardware. The core idea is to represent each learnable projection with a **ternary superposition of amplitudes** and to propagate the resulting state through the network as a **full 2D simplex state**, rather than collapsing it to a single scalar observable
 
 In the current public implementation, the network is a **byte-level autoregressive Transformer-style model** with QTS (Quantum Ternary Superposition) projections in attention and feed-forward layers.
+Important: right now its only showcase
 
 ---
 
