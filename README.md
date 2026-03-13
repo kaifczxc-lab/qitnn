@@ -447,8 +447,6 @@ No Guarantees: This code is provided "AS IS", without any warranty or guarantee 
 
 Constructive criticism is welcome, but open hate towards the entire work is not welcome.
 
-If you're interested in the concept, feel free to explore, adapt, and contribute!
-
 ---
 
 ## Development Log
