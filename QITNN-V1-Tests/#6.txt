@@ -1,0 +1,133 @@
+Test#6
+SerenaParcer.h dataset
+serenaQNN
+config: dim=256,ffn=512,seq=128,layers=2,epochs=5,lr-start=0.003,lr-end=0.0008
+core: psi_triplet (an, az, ap)
+fwd: hidden=[x|y] in centered simplex basis, attention is full 2D, ff1/ff2 stay 2D, ent=0.01, eff-floor=2.12, floor-step=0.01->0.001   
+initializing amplitudes
+[gpu] CUDA ready: 1 device(s), using: NVIDIA GeForce RTX 3060 Ti (sm_86)
+init complete
+pinning persistent qts raw buffers
+qts raw buffers pinned
+pinning QTS weight amplitudes on GPU...
+all weights + raw qts buffers pinned on GPU
+loading dataset into RAM (65536 bytes max)...
+loaded 65535 bytes zero file I/O during training
+  [L1 ff2 backnorm3 outputs:]
+    ||dc_neg||2 = 0.52302986 (mean=0.00288936)
+    ||dc_zero||2 = 0.57460666 (mean=0.00317428)
+    ||dc_pos||2 = 0.61259222 (mean=0.00338413)
+    ||L1_ff2_grad_n||2 = 4.68095875 (mean=0.00914250)
+    ||L1_ff2_grad_z||2 = 5.11895847 (mean=0.00999797)
+  [L1 ff1 backnorm3 outputs:]
+    ||dc_neg||2 = 1.13297212 (mean=0.00442567)
+    ||dc_zero||2 = 1.58916199 (mean=0.00620766)
+    ||dc_pos||2 = 1.10652030 (mean=0.00432234)
+    ||L1_ff1_grad_n||2 = 26.50526047 (mean=0.05176809)
+    ||L1_ff1_grad_z||2 = 35.54704285 (mean=0.06942782)
+epoch 1/5  avg_loss=3.41564375024  samples=400
+  [L1 ff1] (epoch 1)
+    P-=0.437 P0=0.281 P+=0.282 | H=1.0036/1.5850 | eff=2.00/3 | col=12.6%
+    ampl: sum_n=-346.9695 sum_z=18.8853 sum_p=-25.9723 | rms=0.660737/0.530969/0.531722
+    dist: P0>0.4=48.1% P0<0.1=26.9% maxP>0.8=25.7% H>1.3=17.2% var(H)=0.1182
+  [L1 ff2] (epoch 1)
+    P-=0.437 P0=0.281 P+=0.282 | H=1.0037/1.5850 | eff=2.01/3 | col=12.5%
+    ampl: sum_n=-98.3529 sum_z=207.3656 sum_p=-239.0617 | rms=0.661122/0.530295/0.531176
+    dist: P0>0.4=49.9% P0<0.1=26.4% maxP>0.8=25.2% H>1.3=17.4% var(H)=0.1178
+  [L1 ff2 backnorm3 outputs:]
+    ||dc_neg||2 = 0.34859672 (mean=0.00192574)
+    ||dc_zero||2 = 0.38382751 (mean=0.00212037)
+    ||dc_pos||2 = 0.38347241 (mean=0.00211841)
+    ||L1_ff2_grad_n||2 = 3.10331607 (mean=0.00606116)
+    ||L1_ff2_grad_z||2 = 3.36609578 (mean=0.00657441)
+  [L1 ff1 backnorm3 outputs:]
+    ||dc_neg||2 = 0.58926672 (mean=0.00230182)
+    ||dc_zero||2 = 0.81589818 (mean=0.00318710)
+    ||dc_pos||2 = 0.61319542 (mean=0.00239529)
+    ||L1_ff1_grad_n||2 = 13.76721382 (mean=0.02688909)
+    ||L1_ff1_grad_z||2 = 18.57527542 (mean=0.03627983)
+epoch 2/5  avg_loss=2.83030570332  samples=400
+  [L1 ff1] (epoch 2)
+    P-=0.435 P0=0.282 P+=0.283 | H=1.0088/1.5850 | eff=2.01/3 | col=12.7%
+    ampl: sum_n=-347.5123 sum_z=16.8745 sum_p=-24.3259 | rms=0.659812/0.532074/0.532625
+    dist: P0>0.4=47.2% P0<0.1=26.9% maxP>0.8=25.8% H>1.3=17.2% var(H)=0.1133
+  [L1 ff2] (epoch 2)
+    P-=0.436 P0=0.282 P+=0.283 | H=1.0096/1.5850 | eff=2.01/3 | col=12.5%
+    ampl: sum_n=-97.3483 sum_z=204.5474 sum_p=-234.0402 | rms=0.660100/0.531186/0.531835
+    dist: P0>0.4=49.8% P0<0.1=26.0% maxP>0.8=25.2% H>1.3=17.3% var(H)=0.1123
+  [L1 ff2 backnorm3 outputs:]
+    ||dc_neg||2 = 0.48573041 (mean=0.00268331)
+    ||dc_zero||2 = 0.53806609 (mean=0.00297242)
+    ||dc_pos||2 = 0.52766287 (mean=0.00291495)
+    ||L1_ff2_grad_n||2 = 4.14959145 (mean=0.00810467)
+    ||L1_ff2_grad_z||2 = 4.64423084 (mean=0.00907076)
+  [L1 ff1 backnorm3 outputs:]
+    ||dc_neg||2 = 0.76629806 (mean=0.00299335)
+    ||dc_zero||2 = 1.08886087 (mean=0.00425336)
+    ||dc_pos||2 = 0.73167461 (mean=0.00285810)
+    ||L1_ff1_grad_n||2 = 17.95165634 (mean=0.03506183)
+    ||L1_ff1_grad_z||2 = 25.44403267 (mean=0.04969538)
+epoch 3/5  avg_loss=2.83019197526  samples=400
+  [L1 ff1] (epoch 3)
+    P-=0.434 P0=0.282 P+=0.283 | H=1.0119/1.5850 | eff=2.02/3 | col=12.7%
+    ampl: sum_n=-346.4293 sum_z=16.0365 sum_p=-23.3988 | rms=0.659264/0.532811/0.533240
+    dist: P0>0.4=46.8% P0<0.1=26.8% maxP>0.8=25.9% H>1.3=17.2% var(H)=0.1104
+  [L1 ff2] (epoch 3)
+    P-=0.435 P0=0.282 P+=0.283 | H=1.0134/1.5850 | eff=2.02/3 | col=12.5%
+    ampl: sum_n=-96.7774 sum_z=203.0584 sum_p=-230.3986 | rms=0.659455/0.531766/0.532256
+    dist: P0>0.4=49.7% P0<0.1=25.7% maxP>0.8=25.2% H>1.3=17.3% var(H)=0.1089
+  [L1 ff2 backnorm3 outputs:]
+    ||dc_neg||2 = 0.43121248 (mean=0.00238213)
+    ||dc_zero||2 = 0.44779414 (mean=0.00247374)
+    ||dc_pos||2 = 0.44700018 (mean=0.00246935)
+    ||L1_ff2_grad_n||2 = 3.69411421 (mean=0.00721507)
+    ||L1_ff2_grad_z||2 = 3.80683017 (mean=0.00743522)
+  [L1 ff1 backnorm3 outputs:]
+    ||dc_neg||2 = 0.95748794 (mean=0.00374019)
+    ||dc_zero||2 = 1.21280599 (mean=0.00473752)
+    ||dc_pos||2 = 0.65449029 (mean=0.00255660)
+    ||L1_ff1_grad_n||2 = 21.74148941 (mean=0.04246385)
+    ||L1_ff1_grad_z||2 = 27.85713768 (mean=0.05440847)
+epoch 4/5  avg_loss=2.73934706081  samples=400
+  [L1 ff1] (epoch 4)
+    P-=0.434 P0=0.282 P+=0.284 | H=1.0136/1.5850 | eff=2.02/3 | col=12.7%
+    ampl: sum_n=-346.2020 sum_z=16.1003 sum_p=-23.1291 | rms=0.658988/0.533269/0.533617
+    dist: P0>0.4=46.5% P0<0.1=26.9% maxP>0.8=25.9% H>1.3=17.2% var(H)=0.1091
+  [L1 ff2] (epoch 4)
+    P-=0.434 P0=0.283 P+=0.283 | H=1.0155/1.5850 | eff=2.02/3 | col=12.5%
+    ampl: sum_n=-96.3867 sum_z=201.6271 sum_p=-227.1567 | rms=0.659101/0.532111/0.532494
+    dist: P0>0.4=49.6% P0<0.1=25.6% maxP>0.8=25.2% H>1.3=17.3% var(H)=0.1071
+  [L1 ff2 backnorm3 outputs:]
+    ||dc_neg||2 = 0.43577912 (mean=0.00240736)
+    ||dc_zero||2 = 0.52567154 (mean=0.00290395)
+    ||dc_pos||2 = 0.46936736 (mean=0.00259291)
+    ||L1_ff2_grad_n||2 = 3.47385049 (mean=0.00678486)
+    ||L1_ff2_grad_z||2 = 4.19975185 (mean=0.00820264)
+  [L1 ff1 backnorm3 outputs:]
+    ||dc_neg||2 = 0.80728167 (mean=0.00315344)
+    ||dc_zero||2 = 1.01907885 (mean=0.00398078)
+    ||dc_pos||2 = 0.63960332 (mean=0.00249845)
+    ||L1_ff1_grad_n||2 = 18.62108421 (mean=0.03636931)
+    ||L1_ff1_grad_z||2 = 23.74105263 (mean=0.04636924)
+epoch 5/5  avg_loss=2.67829160589  samples=400
+  [L1 ff1] (epoch 5)
+    P-=0.434 P0=0.283 P+=0.284 | H=1.0142/1.5850 | eff=2.02/3 | col=12.7%
+    ampl: sum_n=-346.2538 sum_z=15.5844 sum_p=-22.8159 | rms=0.658891/0.533518/0.533816
+    dist: P0>0.4=46.3% P0<0.1=26.9% maxP>0.8=25.9% H>1.3=17.2% var(H)=0.1086
+  [L1 ff2] (epoch 5)
+    P-=0.434 P0=0.283 P+=0.283 | H=1.0165/1.5850 | eff=2.02/3 | col=12.5%
+    ampl: sum_n=-96.1031 sum_z=201.5337 sum_p=-225.0503 | rms=0.658951/0.532286/0.532602
+    dist: P0>0.4=49.5% P0<0.1=25.5% maxP>0.8=25.2% H>1.3=17.3% var(H)=0.1064
+Enter text to get answer or write exit to get exit
+
+> main
+main"f"   at_                        cost_                     <<<<<<<                   fl                  cut_Ciz
+
+> cuda
+cudadaseolorndat_                    cost_                     <<<<<<<                   fl                  cut_Cat_
+
+> \n
+\n       <<<<<                       "ost_                                                    "                   " <<<<<       
+
+> exit
+bye!
