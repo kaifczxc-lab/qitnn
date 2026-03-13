@@ -9,7 +9,7 @@ In the current public implementation, the network is a **byte-level autoregressi
 
 ## Links
 
-Analysis of Architecture V1: [Analysis-QITNN.md](https://github.com/kaifczxc-lab/qitnn/blob/SiritoriProjects/Analysis-QITNN.md)
+Analysis of Architecture: [Analysis-QITNN.md](https://github.com/kaifczxc-lab/qitnn/blob/SiritoriProjects/Analysis-QITNN.md)
 
 Original Devlog: [Discord Devlog Thread GPU Mode](https://discord.com/channels/1189498204333543425/1466534042768904356/1476227907327098931)
 
