@@ -435,12 +435,6 @@ So the project is best understood as:
 
 ---
 
-## Important implementation note
-
-The current public script declares `LAYERS = 4`, but the manually instantiated forward/backward path currently materializes **two explicit blocks** (`layer 0` and `layer 1`). The architecture itself is general, but the present script executes two layers until the layer stack is generalized in code.
-
----
-
 ## Short summary
 
 QITNN is a quantum-inspired Transformer-style language model that replaces standard linear projections with ternary amplitude projections, applies Born-style normalization, and carries the resulting ternary state through the network as a **full centered 2D simplex state**.
