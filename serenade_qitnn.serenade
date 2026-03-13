@@ -439,7 +439,6 @@ cycle EPOCHS as ep {
         gpu qts_forward3 K Ky cn_k_L0 cz_k_L0 cp_k_L0 hidden wk0_n wk0_z wk0_p SEQ HDIM DIM
         gpu qts_forward3 V Vy cn_v_L0 cz_v_L0 cp_v_L0 hidden wv0_n wv0_z wv0_p SEQ HDIM DIM
         cycle SEQ * DIM as j {
-            # what the fuck?
             Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
             Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
             Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
