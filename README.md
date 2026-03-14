@@ -447,7 +447,7 @@ Hardware Specificity: The CUDA kernels are heavily optimized for my specific har
 
 No Guarantees: This code is provided "AS IS", without any warranty or guarantee of correctness, performance, or suitability for any purpose. It works on my machine. That's all I can promise.
 
-Constructive criticism is welcome, but open hate towards the entire work is not welcome.
+Constructive criticism is welcome
 
 ---
 
