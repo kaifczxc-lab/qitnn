@@ -17,38 +17,49 @@ const HDIM = DIM * 2
 const HFFN = FFN * 2
 const SEQ = 256
 const LAYERS = 2
+const LOGMAXLAYERS = 2
 const MAX_TOK = 1048576
-const ENT_LAMBDA = 0.01
+const ENT_LAMBDA = 0
+const ENT_LAMBDA_QK = ENT_LAMBDA
+const ENT_LAMBDA_VO = ENT_LAMBDA
+const ENT_LAMBDA_FF = ENT_LAMBDA
 const SIMPLEX_SQRT3 = 1.7320508
 const SIMPLEX_INV_SQRT3 = 0.57735026
-# Just an anti-collapse rail. Above this floor the prior goes fully silent.
 const TRIT_FLOOR_EFF = 2.12
 const TRIT_FLOOR_H = 1.0840643
 const TRIT_FLOOR_MUL_START = 0.01
 const TRIT_FLOOR_MUL_END = 0.001
-#const ZERO_BOOST = 3.5
 const ZERO_BOOST = 3.5
+const TRIT_FLOOR_MUL_QK_START = TRIT_FLOOR_MUL_START
+const TRIT_FLOOR_MUL_QK_END = TRIT_FLOOR_MUL_END
+const TRIT_FLOOR_MUL_VO_START = TRIT_FLOOR_MUL_START
+const TRIT_FLOOR_MUL_VO_END = TRIT_FLOOR_MUL_END
+const TRIT_FLOOR_MUL_FF_START = TRIT_FLOOR_MUL_START
+const TRIT_FLOOR_MUL_FF_END = TRIT_FLOOR_MUL_END
+const ZERO_BOOST_QK = ZERO_BOOST
+const ZERO_BOOST_VO = ZERO_BOOST
+const ZERO_BOOST_FF = ZERO_BOOST
 const TEMPERATURE = 0.5
 const TOP_K = 8
-#=======================
-# basic settings
-#const EPOCHS = 3
-#const LR_START = 0.001
-#const LR_END = 0.0001
-#const DATASET_SIZE = 1073741824
-#const STEPS_PER_EPOCH = 25000
-#=======================
-# overfit test
-const EPOCHS = 50
+const VAL_SPLIT_DIV = 10
+const DEBUG_BACKNORM_EVERY = 0
+const TRAIN_MENU_KEY = 80
+const EPOCHS = 100
 const LR_START = 0.005
 const LR_END = 0.001
 const DATASET_SIZE = 1048576
 const STEPS_PER_EPOCH = 1000
 #=======================
 emit "serenaQNN"
-emit "config: dim={DIM},ffn={FFN},seq={SEQ},layers={LAYERS},epochs={EPOCHS},lr-start={LR_START},lr-end={LR_END}, zero_boost={ZERO_BOOST}, ent_lambda={ENT_LAMBDA}, trit_floor_mul_start={TRIT_FLOOR_MUL_START}, trit_floor_mul_end={TRIT_FLOOR_MUL_END}"
+emit "config: dim={DIM},ffn={FFN},seq={SEQ},requested_layers={LAYERS}, epochs={EPOCHS},lr-start={LR_START},lr-end={LR_END}, zero_boost={ZERO_BOOST}, ent_lambda={ENT_LAMBDA}, trit_floor_mul_start={TRIT_FLOOR_MUL_START}, trit_floor_mul_end={TRIT_FLOOR_MUL_END}"
 emit "core: psi_triplet (an, az, ap)"
 emit "fwd: hidden=[x|y] in centered simplex basis, attention is full 2D, ff1/ff2 stay 2D, ent={ENT_LAMBDA}, eff-floor={TRIT_FLOOR_EFF}, floor-step={TRIT_FLOOR_MUL_START}->{TRIT_FLOOR_MUL_END}"
+emit "rails: qk(ent={ENT_LAMBDA_QK}, zero={ZERO_BOOST_QK}, floor={TRIT_FLOOR_MUL_QK_START}->{TRIT_FLOOR_MUL_QK_END}), vo(ent={ENT_LAMBDA_VO}, zero={ZERO_BOOST_VO}, floor={TRIT_FLOOR_MUL_VO_START}->{TRIT_FLOOR_MUL_VO_END}), ff(ent={ENT_LAMBDA_FF}, zero={ZERO_BOOST_FF}, floor={TRIT_FLOOR_MUL_FF_START}->{TRIT_FLOOR_MUL_FF_END})"
+emit "logging: train_avg_loss = sum(train _sr_celoss) / train_steps, val_avg_loss = sum(val _sr_celoss) / val_steps"
+emit "logging: validation is forward-only on a held-out tail split; no SGD, no qts_prior, no train samples reused"
+if LAYERS != LOGMAXLAYERS {
+    emit "ERR executable graph is hardwired to LOGMAXLAYERS={LOGMAXLAYERS}, changing LAYERS alone does not add blocks"
+}
 #=======================
 # 2d simplex scratch
 # u_tmp_* is still the signed x-axis
@@ -268,6 +279,16 @@ let saved_pre_final_ln = @f32[SEQ * HDIM]
 let dataset = @u8[DATASET_SIZE]
 let tokens = @f32[SEQ]
 let targets = @f32[SEQ]
+let ckpt_tok_emb_buf = @f32[VOCAB * HDIM]
+let ckpt_pos_emb_buf = @f32[SEQ * HDIM]
+let ckpt_ln0_buf = @f32[HDIM * 4]
+let ckpt_ln1_buf = @f32[HDIM * 4]
+let ckpt_lnf_buf = @f32[HDIM * 2]
+let ckpt_qts0_buf = @f32[HDIM * DIM * 12]
+let ckpt_qts1_buf = @f32[HDIM * DIM * 12]
+let ckpt_ff0_buf = @f32[HDIM * FFN * 3 + HFFN * DIM * 3]
+let ckpt_ff1_buf = @f32[HDIM * FFN * 3 + HFFN * DIM * 3]
+let ckpt_out_buf = @f32[HDIM * VOCAB + VOCAB]
 #=======================
 # init
 #=======================
@@ -390,30 +411,387 @@ files fc = scan "D:\so_data" "*.txt"
 emit "loading dataset into RAM ({DATASET_SIZE} bytes max)..."
 readfile data_len = load dataset 0 DATASET_SIZE
 emit "loaded {data_len} bytes zero file I/O during training"
+let min_split_tokens = SEQ + 1
+let val_tokens = data_len / VAL_SPLIT_DIV
+if val_tokens < min_split_tokens {
+    val_tokens = min_split_tokens
+}
+let max_val_tokens = data_len - min_split_tokens
+if val_tokens > max_val_tokens {
+    val_tokens = max_val_tokens
+}
+let train_tokens = data_len - val_tokens
+let train_max_start = train_tokens - SEQ - 1
+let val_offset = train_tokens
+let val_steps = (val_tokens - 1) / SEQ
+emit "data split: train_bytes={train_tokens}, val_bytes={val_tokens}, val_offset={val_offset}, val_windows={val_steps}, val_stride={SEQ}"
+if val_steps < 1 {
+    emit "warning: held-out split is too small for one full validation window at seq={SEQ}"
+}
+let ckpt_meta = @f32[10]
+let ckpt_meta_path = "C:/Users/user/serena_qts_ckpt_meta.bin"
+let ckpt_tok_emb_path = "C:/Users/user/serena_qts_ckpt_tok_emb.bin"
+let ckpt_pos_emb_path = "C:/Users/user/serena_qts_ckpt_pos_emb.bin"
+let ckpt_ln0_path = "C:/Users/user/serena_qts_ckpt_ln0.bin"
+let ckpt_ln1_path = "C:/Users/user/serena_qts_ckpt_ln1.bin"
+let ckpt_lnf_path = "C:/Users/user/serena_qts_ckpt_lnf.bin"
+let ckpt_qts0_path = "C:/Users/user/serena_qts_ckpt_qts0.bin"
+let ckpt_qts1_path = "C:/Users/user/serena_qts_ckpt_qts1.bin"
+let ckpt_ff0_path = "C:/Users/user/serena_qts_ckpt_ff0.bin"
+let ckpt_ff1_path = "C:/Users/user/serena_qts_ckpt_ff1.bin"
+let ckpt_out_path = "C:/Users/user/serena_qts_ckpt_out.bin"
+emit "training control: press P during training to open pause menu; pause/save happens between train steps"
 #=======================
 # training
 #=======================
 let total_steps = EPOCHS * STEPS_PER_EPOCH
 let step_num = 0
 let lr = LR_START
-cycle EPOCHS as ep {
+let best_train_loss = 0.0
+let best_train_epoch = 0
+let best_val_loss = 0.0
+let best_val_epoch = 0
+let run_training = 1
+let open_generation_prompt = 1
+let stop_training = 0
+let resume_loaded = 0
+let resume_epoch = 0
+let resume_step_in_epoch = 0
+let resume_total_loss = 0.0
+let resume_n_samples = 0
+if file_exists(ckpt_meta_path) == 1 {
+    let resume_choice = menu3("checkpoint found", "resume training", "start fresh", "skip training")
+    if resume_choice == 1 {
+        let ckpt_ok = 1
+        ckpt_ok = ckpt_ok * load_f32(ckpt_meta_path, ckpt_meta, 10)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_tok_emb_path, ckpt_tok_emb_buf, VOCAB * HDIM)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_pos_emb_path, ckpt_pos_emb_buf, SEQ * HDIM)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_ln0_path, ckpt_ln0_buf, HDIM * 4)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_ln1_path, ckpt_ln1_buf, HDIM * 4)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_lnf_path, ckpt_lnf_buf, HDIM * 2)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_qts0_path, ckpt_qts0_buf, HDIM * DIM * 12)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_qts1_path, ckpt_qts1_buf, HDIM * DIM * 12)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_ff0_path, ckpt_ff0_buf, HDIM * FFN * 3 + HFFN * DIM * 3)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_ff1_path, ckpt_ff1_buf, HDIM * FFN * 3 + HFFN * DIM * 3)
+        ckpt_ok = ckpt_ok * load_f32(ckpt_out_path, ckpt_out_buf, HDIM * VOCAB + VOCAB)
+        if ckpt_ok == 1 {
+            cycle VOCAB * HDIM as j {
+                tok_emb^[j] = ckpt_tok_emb_buf^[j]
+            }
+            cycle SEQ * HDIM as j {
+                pos_emb^[j] = ckpt_pos_emb_buf^[j]
+            }
+            cycle HDIM as d {
+                ln1_g0^[d] = ckpt_ln0_buf^[d]
+                ln1_b0^[d] = ckpt_ln0_buf^[HDIM + d]
+                ln2_g0^[d] = ckpt_ln0_buf^[HDIM * 2 + d]
+                ln2_b0^[d] = ckpt_ln0_buf^[HDIM * 3 + d]
+                ln1_g1^[d] = ckpt_ln1_buf^[d]
+                ln1_b1^[d] = ckpt_ln1_buf^[HDIM + d]
+                ln2_g1^[d] = ckpt_ln1_buf^[HDIM * 2 + d]
+                ln2_b1^[d] = ckpt_ln1_buf^[HDIM * 3 + d]
+                ln_f_g^[d] = ckpt_lnf_buf^[d]
+                ln_f_b^[d] = ckpt_lnf_buf^[HDIM + d]
+            }
+            cycle HDIM * DIM as j {
+                wq0_n^[j] = ckpt_qts0_buf^[j]
+                wq0_z^[j] = ckpt_qts0_buf^[HDIM * DIM + j]
+                wq0_p^[j] = ckpt_qts0_buf^[HDIM * DIM * 2 + j]
+                wk0_n^[j] = ckpt_qts0_buf^[HDIM * DIM * 3 + j]
+                wk0_z^[j] = ckpt_qts0_buf^[HDIM * DIM * 4 + j]
+                wk0_p^[j] = ckpt_qts0_buf^[HDIM * DIM * 5 + j]
+                wv0_n^[j] = ckpt_qts0_buf^[HDIM * DIM * 6 + j]
+                wv0_z^[j] = ckpt_qts0_buf^[HDIM * DIM * 7 + j]
+                wv0_p^[j] = ckpt_qts0_buf^[HDIM * DIM * 8 + j]
+                wo0_n^[j] = ckpt_qts0_buf^[HDIM * DIM * 9 + j]
+                wo0_z^[j] = ckpt_qts0_buf^[HDIM * DIM * 10 + j]
+                wo0_p^[j] = ckpt_qts0_buf^[HDIM * DIM * 11 + j]
+                wq1_n^[j] = ckpt_qts1_buf^[j]
+                wq1_z^[j] = ckpt_qts1_buf^[HDIM * DIM + j]
+                wq1_p^[j] = ckpt_qts1_buf^[HDIM * DIM * 2 + j]
+                wk1_n^[j] = ckpt_qts1_buf^[HDIM * DIM * 3 + j]
+                wk1_z^[j] = ckpt_qts1_buf^[HDIM * DIM * 4 + j]
+                wk1_p^[j] = ckpt_qts1_buf^[HDIM * DIM * 5 + j]
+                wv1_n^[j] = ckpt_qts1_buf^[HDIM * DIM * 6 + j]
+                wv1_z^[j] = ckpt_qts1_buf^[HDIM * DIM * 7 + j]
+                wv1_p^[j] = ckpt_qts1_buf^[HDIM * DIM * 8 + j]
+                wo1_n^[j] = ckpt_qts1_buf^[HDIM * DIM * 9 + j]
+                wo1_z^[j] = ckpt_qts1_buf^[HDIM * DIM * 10 + j]
+                wo1_p^[j] = ckpt_qts1_buf^[HDIM * DIM * 11 + j]
+            }
+            cycle HDIM * FFN as j {
+                ff1_w0_n^[j] = ckpt_ff0_buf^[j]
+                ff1_w0_z^[j] = ckpt_ff0_buf^[HDIM * FFN + j]
+                ff1_w0_p^[j] = ckpt_ff0_buf^[HDIM * FFN * 2 + j]
+                ff1_w1_n^[j] = ckpt_ff1_buf^[j]
+                ff1_w1_z^[j] = ckpt_ff1_buf^[HDIM * FFN + j]
+                ff1_w1_p^[j] = ckpt_ff1_buf^[HDIM * FFN * 2 + j]
+            }
+            cycle HFFN * DIM as j {
+                ff2_w0_n^[j] = ckpt_ff0_buf^[HDIM * FFN * 3 + j]
+                ff2_w0_z^[j] = ckpt_ff0_buf^[HDIM * FFN * 3 + HFFN * DIM + j]
+                ff2_w0_p^[j] = ckpt_ff0_buf^[HDIM * FFN * 3 + HFFN * DIM * 2 + j]
+                ff2_w1_n^[j] = ckpt_ff1_buf^[HDIM * FFN * 3 + j]
+                ff2_w1_z^[j] = ckpt_ff1_buf^[HDIM * FFN * 3 + HFFN * DIM + j]
+                ff2_w1_p^[j] = ckpt_ff1_buf^[HDIM * FFN * 3 + HFFN * DIM * 2 + j]
+            }
+            cycle HDIM * VOCAB as j {
+                out_w^[j] = ckpt_out_buf^[j]
+            }
+            cycle VOCAB as j {
+                out_b^[j] = ckpt_out_buf^[HDIM * VOCAB + j]
+            }
+            gpu syncup tok_emb VOCAB * HDIM
+            gpu syncup pos_emb SEQ * HDIM
+            gpu syncup wq0_n HDIM * DIM
+            gpu syncup wq0_z HDIM * DIM
+            gpu syncup wq0_p HDIM * DIM
+            gpu syncup wk0_n HDIM * DIM
+            gpu syncup wk0_z HDIM * DIM
+            gpu syncup wk0_p HDIM * DIM
+            gpu syncup wv0_n HDIM * DIM
+            gpu syncup wv0_z HDIM * DIM
+            gpu syncup wv0_p HDIM * DIM
+            gpu syncup wo0_n HDIM * DIM
+            gpu syncup wo0_z HDIM * DIM
+            gpu syncup wo0_p HDIM * DIM
+            gpu syncup ff1_w0_n HDIM * FFN
+            gpu syncup ff1_w0_z HDIM * FFN
+            gpu syncup ff1_w0_p HDIM * FFN
+            gpu syncup ff2_w0_n HFFN * DIM
+            gpu syncup ff2_w0_z HFFN * DIM
+            gpu syncup ff2_w0_p HFFN * DIM
+            gpu syncup wq1_n HDIM * DIM
+            gpu syncup wq1_z HDIM * DIM
+            gpu syncup wq1_p HDIM * DIM
+            gpu syncup wk1_n HDIM * DIM
+            gpu syncup wk1_z HDIM * DIM
+            gpu syncup wk1_p HDIM * DIM
+            gpu syncup wv1_n HDIM * DIM
+            gpu syncup wv1_z HDIM * DIM
+            gpu syncup wv1_p HDIM * DIM
+            gpu syncup wo1_n HDIM * DIM
+            gpu syncup wo1_z HDIM * DIM
+            gpu syncup wo1_p HDIM * DIM
+            gpu syncup ff1_w1_n HDIM * FFN
+            gpu syncup ff1_w1_z HDIM * FFN
+            gpu syncup ff1_w1_p HDIM * FFN
+            gpu syncup ff2_w1_n HFFN * DIM
+            gpu syncup ff2_w1_z HFFN * DIM
+            gpu syncup ff2_w1_p HFFN * DIM
+            gpu syncup out_w HDIM * VOCAB
+            resume_epoch = ckpt_meta^[0]
+            resume_step_in_epoch = ckpt_meta^[1]
+            step_num = ckpt_meta^[2]
+            best_train_loss = ckpt_meta^[3]
+            best_train_epoch = ckpt_meta^[4]
+            best_val_loss = ckpt_meta^[5]
+            best_val_epoch = ckpt_meta^[6]
+            resume_total_loss = ckpt_meta^[7]
+            resume_n_samples = ckpt_meta^[8]
+            resume_loaded = 1
+            emit "checkpoint restored: epoch={resume_epoch + 1}, step={resume_step_in_epoch}, global_step={step_num}"
+        }
+        if ckpt_ok == 0 {
+            emit "checkpoint load failed, starting fresh"
+        }
+    }
+    if resume_choice == 3 {
+        run_training = 0
+        open_generation_prompt = 0
+    }
+}
+let ep = 0
+if resume_loaded == 1 {
+    ep = resume_epoch
+}
+while run_training == 1 {
+    if ep >= EPOCHS {
+        break
+    }
     let total_loss = 0.0
     let n_samples = 0
-    cycle STEPS_PER_EPOCH as ii {
+    let ii = 0
+    if resume_loaded == 1 {
+        total_loss = resume_total_loss
+        n_samples = resume_n_samples
+        ii = resume_step_in_epoch
+        resume_loaded = 0
+        emit "resume active: continuing epoch {ep + 1} from step {ii}"
+    }
+    while ii < STEPS_PER_EPOCH {
+        if key_pressed(TRAIN_MENU_KEY) == 1 {
+            let menu_action = menu3("training paused", "continue", "save checkpoint", "save and stop")
+            if menu_action == 2 or menu_action == 3 {
+                # QTS weights and some persistent tensors are pinned on GPU.
+                # Sync device state back to host before packing, otherwise resume
+                # would restore stale host-side copies.
+                gpu syncdown wq0_n HDIM * DIM
+                gpu syncdown wq0_z HDIM * DIM
+                gpu syncdown wq0_p HDIM * DIM
+                gpu syncdown wk0_n HDIM * DIM
+                gpu syncdown wk0_z HDIM * DIM
+                gpu syncdown wk0_p HDIM * DIM
+                gpu syncdown wv0_n HDIM * DIM
+                gpu syncdown wv0_z HDIM * DIM
+                gpu syncdown wv0_p HDIM * DIM
+                gpu syncdown wo0_n HDIM * DIM
+                gpu syncdown wo0_z HDIM * DIM
+                gpu syncdown wo0_p HDIM * DIM
+                gpu syncdown ff1_w0_n HDIM * FFN
+                gpu syncdown ff1_w0_z HDIM * FFN
+                gpu syncdown ff1_w0_p HDIM * FFN
+                gpu syncdown ff2_w0_n HFFN * DIM
+                gpu syncdown ff2_w0_z HFFN * DIM
+                gpu syncdown ff2_w0_p HFFN * DIM
+                gpu syncdown wq1_n HDIM * DIM
+                gpu syncdown wq1_z HDIM * DIM
+                gpu syncdown wq1_p HDIM * DIM
+                gpu syncdown wk1_n HDIM * DIM
+                gpu syncdown wk1_z HDIM * DIM
+                gpu syncdown wk1_p HDIM * DIM
+                gpu syncdown wv1_n HDIM * DIM
+                gpu syncdown wv1_z HDIM * DIM
+                gpu syncdown wv1_p HDIM * DIM
+                gpu syncdown wo1_n HDIM * DIM
+                gpu syncdown wo1_z HDIM * DIM
+                gpu syncdown wo1_p HDIM * DIM
+                gpu syncdown ff1_w1_n HDIM * FFN
+                gpu syncdown ff1_w1_z HDIM * FFN
+                gpu syncdown ff1_w1_p HDIM * FFN
+                gpu syncdown ff2_w1_n HFFN * DIM
+                gpu syncdown ff2_w1_z HFFN * DIM
+                gpu syncdown ff2_w1_p HFFN * DIM
+                gpu syncdown out_w HDIM * VOCAB
+                gpu syncdown tok_emb VOCAB * HDIM
+                gpu syncdown pos_emb SEQ * HDIM
+                cycle HDIM as d {
+                    ckpt_ln0_buf^[d] = ln1_g0^[d]
+                    ckpt_ln0_buf^[HDIM + d] = ln1_b0^[d]
+                    ckpt_ln0_buf^[HDIM * 2 + d] = ln2_g0^[d]
+                    ckpt_ln0_buf^[HDIM * 3 + d] = ln2_b0^[d]
+                    ckpt_ln1_buf^[d] = ln1_g1^[d]
+                    ckpt_ln1_buf^[HDIM + d] = ln1_b1^[d]
+                    ckpt_ln1_buf^[HDIM * 2 + d] = ln2_g1^[d]
+                    ckpt_ln1_buf^[HDIM * 3 + d] = ln2_b1^[d]
+                    ckpt_lnf_buf^[d] = ln_f_g^[d]
+                    ckpt_lnf_buf^[HDIM + d] = ln_f_b^[d]
+                }
+                cycle HDIM * DIM as j {
+                    ckpt_qts0_buf^[j] = wq0_n^[j]
+                    ckpt_qts0_buf^[HDIM * DIM + j] = wq0_z^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 2 + j] = wq0_p^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 3 + j] = wk0_n^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 4 + j] = wk0_z^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 5 + j] = wk0_p^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 6 + j] = wv0_n^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 7 + j] = wv0_z^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 8 + j] = wv0_p^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 9 + j] = wo0_n^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 10 + j] = wo0_z^[j]
+                    ckpt_qts0_buf^[HDIM * DIM * 11 + j] = wo0_p^[j]
+                    ckpt_qts1_buf^[j] = wq1_n^[j]
+                    ckpt_qts1_buf^[HDIM * DIM + j] = wq1_z^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 2 + j] = wq1_p^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 3 + j] = wk1_n^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 4 + j] = wk1_z^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 5 + j] = wk1_p^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 6 + j] = wv1_n^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 7 + j] = wv1_z^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 8 + j] = wv1_p^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 9 + j] = wo1_n^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 10 + j] = wo1_z^[j]
+                    ckpt_qts1_buf^[HDIM * DIM * 11 + j] = wo1_p^[j]
+                }
+                cycle HDIM * FFN as j {
+                    ckpt_ff0_buf^[j] = ff1_w0_n^[j]
+                    ckpt_ff0_buf^[HDIM * FFN + j] = ff1_w0_z^[j]
+                    ckpt_ff0_buf^[HDIM * FFN * 2 + j] = ff1_w0_p^[j]
+                    ckpt_ff1_buf^[j] = ff1_w1_n^[j]
+                    ckpt_ff1_buf^[HDIM * FFN + j] = ff1_w1_z^[j]
+                    ckpt_ff1_buf^[HDIM * FFN * 2 + j] = ff1_w1_p^[j]
+                }
+                cycle HFFN * DIM as j {
+                    ckpt_ff0_buf^[HDIM * FFN * 3 + j] = ff2_w0_n^[j]
+                    ckpt_ff0_buf^[HDIM * FFN * 3 + HFFN * DIM + j] = ff2_w0_z^[j]
+                    ckpt_ff0_buf^[HDIM * FFN * 3 + HFFN * DIM * 2 + j] = ff2_w0_p^[j]
+                    ckpt_ff1_buf^[HDIM * FFN * 3 + j] = ff2_w1_n^[j]
+                    ckpt_ff1_buf^[HDIM * FFN * 3 + HFFN * DIM + j] = ff2_w1_z^[j]
+                    ckpt_ff1_buf^[HDIM * FFN * 3 + HFFN * DIM * 2 + j] = ff2_w1_p^[j]
+                }
+                cycle HDIM * VOCAB as j {
+                    ckpt_out_buf^[j] = out_w^[j]
+                }
+                cycle VOCAB as j {
+                    ckpt_out_buf^[HDIM * VOCAB + j] = out_b^[j]
+                }
+                ckpt_meta^[0] = ep
+                ckpt_meta^[1] = ii
+                ckpt_meta^[2] = step_num
+                ckpt_meta^[3] = best_train_loss
+                ckpt_meta^[4] = best_train_epoch
+                ckpt_meta^[5] = best_val_loss
+                ckpt_meta^[6] = best_val_epoch
+                ckpt_meta^[7] = total_loss
+                ckpt_meta^[8] = n_samples
+                ckpt_meta^[9] = 1
+                let save_ok = 1
+                save_ok = save_ok * save_f32(ckpt_tok_emb_path, tok_emb, VOCAB * HDIM)
+                save_ok = save_ok * save_f32(ckpt_pos_emb_path, pos_emb, SEQ * HDIM)
+                save_ok = save_ok * save_f32(ckpt_ln0_path, ckpt_ln0_buf, HDIM * 4)
+                save_ok = save_ok * save_f32(ckpt_ln1_path, ckpt_ln1_buf, HDIM * 4)
+                save_ok = save_ok * save_f32(ckpt_lnf_path, ckpt_lnf_buf, HDIM * 2)
+                save_ok = save_ok * save_f32(ckpt_qts0_path, ckpt_qts0_buf, HDIM * DIM * 12)
+                save_ok = save_ok * save_f32(ckpt_qts1_path, ckpt_qts1_buf, HDIM * DIM * 12)
+                save_ok = save_ok * save_f32(ckpt_ff0_path, ckpt_ff0_buf, HDIM * FFN * 3 + HFFN * DIM * 3)
+                save_ok = save_ok * save_f32(ckpt_ff1_path, ckpt_ff1_buf, HDIM * FFN * 3 + HFFN * DIM * 3)
+                save_ok = save_ok * save_f32(ckpt_out_path, ckpt_out_buf, HDIM * VOCAB + VOCAB)
+                save_ok = save_ok * save_f32(ckpt_meta_path, ckpt_meta, 10)
+                if save_ok == 1 {
+                    emit "checkpoint saved: epoch={ep + 1}, step={ii}, global_step={step_num}"
+                }
+                if save_ok == 0 {
+                    emit "checkpoint save failed"
+                }
+            }
+            if menu_action == 3 {
+                stop_training = 1
+            }
+        }
+        if stop_training == 1 {
+            break
+        }
         let frac = step_num + 0.0
         let ftotal = total_steps + 0.0
         lr = LR_START + (LR_END - LR_START) * (frac / ftotal)
-        let lr_zero = lr * ZERO_BOOST
-        let trit_floor_mul = TRIT_FLOOR_MUL_START + (TRIT_FLOOR_MUL_END - TRIT_FLOOR_MUL_START) * (frac / ftotal)
-        let trit_floor_step = lr * trit_floor_mul
+        let lr_zero_qk = lr * ZERO_BOOST_QK
+        let lr_zero_vo = lr * ZERO_BOOST_VO
+        let lr_zero_ff = lr * ZERO_BOOST_FF
+        let trit_floor_mul_qk = TRIT_FLOOR_MUL_QK_START + (TRIT_FLOOR_MUL_QK_END - TRIT_FLOOR_MUL_QK_START) * (frac / ftotal)
+        let trit_floor_mul_vo = TRIT_FLOOR_MUL_VO_START + (TRIT_FLOOR_MUL_VO_END - TRIT_FLOOR_MUL_VO_START) * (frac / ftotal)
+        let trit_floor_mul_ff = TRIT_FLOOR_MUL_FF_START + (TRIT_FLOOR_MUL_FF_END - TRIT_FLOOR_MUL_FF_START) * (frac / ftotal)
+        let trit_floor_step_qk = lr * trit_floor_mul_qk
+        let trit_floor_step_vo = lr * trit_floor_mul_vo
+        let trit_floor_step_ff = lr * trit_floor_mul_ff
         step_num = step_num + 1
+        let debug_backnorm = 0
+        if step_num == 1 {
+            debug_backnorm = 1
+        }
+        if DEBUG_BACKNORM_EVERY > 0 {
+            if step_num % DEBUG_BACKNORM_EVERY == 0 {
+                debug_backnorm = 1
+            }
+        }
         # Random crop from preloaded RAM — NO disk I/O
-        let max_start = data_len - SEQ - 1
         let crop_hash = ii * 2971 + ep * 7919 + 13
         if crop_hash < 0 {
             crop_hash = 0 - crop_hash
         }
-        let start = crop_hash % max_start
+        let start = 0
+        if train_max_start > 0 {
+            start = crop_hash % train_max_start
+        }
         cycle SEQ as t {
             tokens^[t] = dataset^[t + start]
             targets^[t] = dataset^[t + start + 1]
@@ -439,6 +817,7 @@ cycle EPOCHS as ep {
         gpu qts_forward3 K Ky cn_k_L0 cz_k_L0 cp_k_L0 hidden wk0_n wk0_z wk0_p SEQ HDIM DIM
         gpu qts_forward3 V Vy cn_v_L0 cz_v_L0 cp_v_L0 hidden wv0_n wv0_z wv0_p SEQ HDIM DIM
         cycle SEQ * DIM as j {
+            # what the fuck?
             Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
             Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
             Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
@@ -618,23 +997,23 @@ cycle EPOCHS as ep {
                 d_attn^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
             }
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn cn_ff2_L1 cz_ff2_L1 cp_ff2_L1 ENT_LAMBDA SEQ * DIM
-        if n_samples == 1 {
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn cn_ff2_L1 cz_ff2_L1 cp_ff2_L1 ENT_LAMBDA_FF SEQ * DIM
+        if debug_backnorm == 1 {
             emit "  [L1 ff2 backnorm3 outputs:]"
             gpu norm2 dc_neg SEQ * DIM "dc_neg"
             gpu norm2 dc_zero SEQ * DIM "dc_zero"
             gpu norm2 dc_pos SEQ * DIM "dc_pos"
         }
         gpu backward ff_mid ff2_w1_n dc_neg gw_ff2 gb_ff2 d_ff_mid SEQ HFFN DIM
-        if n_samples == 1 {
+        if debug_backnorm == 1 {
             gpu norm2 gw_ff2 HFFN * DIM "L1_ff2_grad_n"
         }
         gpu sgd ff2_w1_n gw_ff2 lr HFFN * DIM
         gpu backward ff_mid ff2_w1_z dc_zero gw_ff2 gb_ff2 d_ff_tmp SEQ HFFN DIM
-        if n_samples == 1 {
+        if debug_backnorm == 1 {
             gpu norm2 gw_ff2 HFFN * DIM "L1_ff2_grad_z"
         }
-        gpu sgd ff2_w1_z gw_ff2 lr_zero HFFN * DIM
+        gpu sgd ff2_w1_z gw_ff2 lr_zero_ff HFFN * DIM
         cycle SEQ * HFFN as j {
             d_ff_mid^[j] = d_ff_mid^[j] + d_ff_tmp^[j]
         }
@@ -652,23 +1031,23 @@ cycle EPOCHS as ep {
             }
         }
         gpu gelu_backward u_tmp_ffn saved_pre_ff_L1 SEQ * FFN
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos u_tmp_ffn v_tmp_ffn cn_ff1_L1 cz_ff1_L1 cp_ff1_L1 ENT_LAMBDA SEQ * FFN
-        if n_samples == 1 {
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos u_tmp_ffn v_tmp_ffn cn_ff1_L1 cz_ff1_L1 cp_ff1_L1 ENT_LAMBDA_FF SEQ * FFN
+        if debug_backnorm == 1 {
             emit "  [L1 ff1 backnorm3 outputs:]"
             gpu norm2 dc_neg SEQ * FFN "dc_neg"
             gpu norm2 dc_zero SEQ * FFN "dc_zero"
             gpu norm2 dc_pos SEQ * FFN "dc_pos"
         }
         gpu backward saved_post_ln2_L1 ff1_w1_n dc_neg gw_ff gb_ff d_ln SEQ HDIM FFN
-        if n_samples == 1 {
+        if debug_backnorm == 1 {
             gpu norm2 gw_ff HDIM * FFN "L1_ff1_grad_n"
         }
         gpu sgd ff1_w1_n gw_ff lr HDIM * FFN
         gpu backward saved_post_ln2_L1 ff1_w1_z dc_zero gw_ff gb_ff d_residual SEQ HDIM FFN
-        if n_samples == 1 {
+        if debug_backnorm == 1 {
             gpu norm2 gw_ff HDIM * FFN "L1_ff1_grad_z"
         }
-        gpu sgd ff1_w1_z gw_ff lr_zero HDIM * FFN
+        gpu sgd ff1_w1_z gw_ff lr_zero_ff HDIM * FFN
         cycle SEQ * HDIM as j {
             d_ln^[j] = d_ln^[j] + d_residual^[j]
         }
@@ -692,11 +1071,11 @@ cycle EPOCHS as ep {
                 d_attn_y^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
             }
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn_y cn_o_L1 cz_o_L1 cp_o_L1 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn_y cn_o_L1 cz_o_L1 cp_o_L1 ENT_LAMBDA_VO SEQ * DIM
         gpu backward attn_pair wo1_n dc_neg gw gb d_attn_pair SEQ HDIM DIM
         gpu sgd wo1_n gw lr HDIM * DIM
         gpu backward attn_pair wo1_z dc_zero gw gb d_attn_pair_tmp SEQ HDIM DIM
-        gpu sgd wo1_z gw lr_zero HDIM * DIM
+        gpu sgd wo1_z gw lr_zero_vo HDIM * DIM
         cycle SEQ * HDIM as j {
             d_attn_pair^[j] = d_attn_pair^[j] + d_attn_pair_tmp^[j]
         }
@@ -719,12 +1098,12 @@ cycle EPOCHS as ep {
             dKy^[j] = SIMPLEX_SQRT3 * dKy^[j]
             dVy^[j] = SIMPLEX_SQRT3 * dVy^[j]
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos dQ dQy cn_q_L1 cz_q_L1 cp_q_L1 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dQ dQy cn_q_L1 cz_q_L1 cp_q_L1 ENT_LAMBDA_QK SEQ * DIM
         gpu backward saved_post_ln1_L1 wq1_n dc_neg gw gb d_ln SEQ HDIM DIM
         gpu sgd wq1_n gw lr HDIM * DIM
         gpu copy d_hidden d_ln SEQ * HDIM
         gpu backward saved_post_ln1_L1 wq1_z dc_zero gw gb d_ln SEQ HDIM DIM
-        gpu sgd wq1_z gw lr_zero HDIM * DIM
+        gpu sgd wq1_z gw lr_zero_qk HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
@@ -733,14 +1112,14 @@ cycle EPOCHS as ep {
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos dK dKy cn_k_L1 cz_k_L1 cp_k_L1 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dK dKy cn_k_L1 cz_k_L1 cp_k_L1 ENT_LAMBDA_QK SEQ * DIM
         gpu backward saved_post_ln1_L1 wk1_n dc_neg gw gb d_ln SEQ HDIM DIM
         gpu sgd wk1_n gw lr HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
         gpu backward saved_post_ln1_L1 wk1_z dc_zero gw gb d_ln SEQ HDIM DIM
-        gpu sgd wk1_z gw lr_zero HDIM * DIM
+        gpu sgd wk1_z gw lr_zero_qk HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
@@ -749,14 +1128,14 @@ cycle EPOCHS as ep {
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos dV dVy cn_v_L1 cz_v_L1 cp_v_L1 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dV dVy cn_v_L1 cz_v_L1 cp_v_L1 ENT_LAMBDA_VO SEQ * DIM
         gpu backward saved_post_ln1_L1 wv1_n dc_neg gw gb d_ln SEQ HDIM DIM
         gpu sgd wv1_n gw lr HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
         gpu backward saved_post_ln1_L1 wv1_z dc_zero gw gb d_ln SEQ HDIM DIM
-        gpu sgd wv1_z gw lr_zero HDIM * DIM
+        gpu sgd wv1_z gw lr_zero_vo HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
@@ -781,11 +1160,11 @@ cycle EPOCHS as ep {
                 d_attn^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
             }
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn cn_ff2_L0 cz_ff2_L0 cp_ff2_L0 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn cn_ff2_L0 cz_ff2_L0 cp_ff2_L0 ENT_LAMBDA_FF SEQ * DIM
         gpu backward saved_ff_mid_L0 ff2_w0_n dc_neg gw_ff2 gb_ff2 d_ff_mid SEQ HFFN DIM
         gpu sgd ff2_w0_n gw_ff2 lr HFFN * DIM
         gpu backward saved_ff_mid_L0 ff2_w0_z dc_zero gw_ff2 gb_ff2 d_ff_tmp SEQ HFFN DIM
-        gpu sgd ff2_w0_z gw_ff2 lr_zero HFFN * DIM
+        gpu sgd ff2_w0_z gw_ff2 lr_zero_ff HFFN * DIM
         cycle SEQ * HFFN as j {
             d_ff_mid^[j] = d_ff_mid^[j] + d_ff_tmp^[j]
         }
@@ -803,11 +1182,11 @@ cycle EPOCHS as ep {
             }
         }
         gpu gelu_backward u_tmp_ffn saved_pre_ff_L0 SEQ * FFN
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos u_tmp_ffn v_tmp_ffn cn_ff1_L0 cz_ff1_L0 cp_ff1_L0 ENT_LAMBDA SEQ * FFN
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos u_tmp_ffn v_tmp_ffn cn_ff1_L0 cz_ff1_L0 cp_ff1_L0 ENT_LAMBDA_FF SEQ * FFN
         gpu backward saved_post_ln2_L0 ff1_w0_n dc_neg gw_ff gb_ff d_ln SEQ HDIM FFN
         gpu sgd ff1_w0_n gw_ff lr HDIM * FFN
         gpu backward saved_post_ln2_L0 ff1_w0_z dc_zero gw_ff gb_ff d_residual SEQ HDIM FFN
-        gpu sgd ff1_w0_z gw_ff lr_zero HDIM * FFN
+        gpu sgd ff1_w0_z gw_ff lr_zero_ff HDIM * FFN
         cycle SEQ * HDIM as j {
             d_ln^[j] = d_ln^[j] + d_residual^[j]
         }
@@ -834,11 +1213,11 @@ cycle EPOCHS as ep {
                 d_attn_y^[dst + d] = SIMPLEX_SQRT3 * d_hidden^[src + DIM + d]
             }
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn_y cn_o_L0 cz_o_L0 cp_o_L0 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos d_proj d_attn_y cn_o_L0 cz_o_L0 cp_o_L0 ENT_LAMBDA_VO SEQ * DIM
         gpu backward attn_pair_L0 wo0_n dc_neg gw gb d_attn_pair SEQ HDIM DIM
         gpu sgd wo0_n gw lr HDIM * DIM
         gpu backward attn_pair_L0 wo0_z dc_zero gw gb d_attn_pair_tmp SEQ HDIM DIM
-        gpu sgd wo0_z gw lr_zero HDIM * DIM
+        gpu sgd wo0_z gw lr_zero_vo HDIM * DIM
         cycle SEQ * HDIM as j {
             d_attn_pair^[j] = d_attn_pair^[j] + d_attn_pair_tmp^[j]
         }
@@ -861,12 +1240,12 @@ cycle EPOCHS as ep {
             dKy^[j] = SIMPLEX_SQRT3 * dKy^[j]
             dVy^[j] = SIMPLEX_SQRT3 * dVy^[j]
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos dQ dQy cn_q_L0 cz_q_L0 cp_q_L0 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dQ dQy cn_q_L0 cz_q_L0 cp_q_L0 ENT_LAMBDA_QK SEQ * DIM
         gpu backward saved_post_ln1_L0 wq0_n dc_neg gw gb d_ln SEQ HDIM DIM
         gpu sgd wq0_n gw lr HDIM * DIM
         gpu copy d_hidden d_ln SEQ * HDIM
         gpu backward saved_post_ln1_L0 wq0_z dc_zero gw gb d_ln SEQ HDIM DIM
-        gpu sgd wq0_z gw lr_zero HDIM * DIM
+        gpu sgd wq0_z gw lr_zero_qk HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
@@ -875,14 +1254,14 @@ cycle EPOCHS as ep {
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos dK dKy cn_k_L0 cz_k_L0 cp_k_L0 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dK dKy cn_k_L0 cz_k_L0 cp_k_L0 ENT_LAMBDA_QK SEQ * DIM
         gpu backward saved_post_ln1_L0 wk0_n dc_neg gw gb d_ln SEQ HDIM DIM
         gpu sgd wk0_n gw lr HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
         gpu backward saved_post_ln1_L0 wk0_z dc_zero gw gb d_ln SEQ HDIM DIM
-        gpu sgd wk0_z gw lr_zero HDIM * DIM
+        gpu sgd wk0_z gw lr_zero_qk HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
@@ -891,14 +1270,14 @@ cycle EPOCHS as ep {
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
-        gpu qts_backnorm3 dc_neg dc_zero dc_pos dV dVy cn_v_L0 cz_v_L0 cp_v_L0 ENT_LAMBDA SEQ * DIM
+        gpu qts_backnorm3 dc_neg dc_zero dc_pos dV dVy cn_v_L0 cz_v_L0 cp_v_L0 ENT_LAMBDA_VO SEQ * DIM
         gpu backward saved_post_ln1_L0 wv0_n dc_neg gw gb d_ln SEQ HDIM DIM
         gpu sgd wv0_n gw lr HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
         gpu backward saved_post_ln1_L0 wv0_z dc_zero gw gb d_ln SEQ HDIM DIM
-        gpu sgd wv0_z gw lr_zero HDIM * DIM
+        gpu sgd wv0_z gw lr_zero_vo HDIM * DIM
         cycle SEQ * HDIM as j {
             d_hidden^[j] = d_hidden^[j] + d_ln^[j]
         }
@@ -920,23 +1299,182 @@ cycle EPOCHS as ep {
         gpu sgd pos_emb d_hidden lr SEQ * HDIM
         # soft entropy floor on qutrit weights
         # it only pushes when a triplet starts collapsing below the chosen eff floor
-        gpu qts_prior wq0_n wq0_z wq0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior wk0_n wk0_z wk0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior wv0_n wv0_z wv0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior wo0_n wo0_z wo0_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior ff1_w0_n ff1_w0_z ff1_w0_p trit_floor_step TRIT_FLOOR_H HDIM * FFN
-        gpu qts_prior ff2_w0_n ff2_w0_z ff2_w0_p trit_floor_step TRIT_FLOOR_H HFFN * DIM
-        gpu qts_prior wq1_n wq1_z wq1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior wk1_n wk1_z wk1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior wv1_n wv1_z wv1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior wo1_n wo1_z wo1_p trit_floor_step TRIT_FLOOR_H HDIM * DIM
-        gpu qts_prior ff1_w1_n ff1_w1_z ff1_w1_p trit_floor_step TRIT_FLOOR_H HDIM * FFN
-        gpu qts_prior ff2_w1_n ff2_w1_z ff2_w1_p trit_floor_step TRIT_FLOOR_H HFFN * DIM
+        gpu qts_prior wq0_n wq0_z wq0_p trit_floor_step_qk TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wk0_n wk0_z wk0_p trit_floor_step_qk TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wv0_n wv0_z wv0_p trit_floor_step_vo TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wo0_n wo0_z wo0_p trit_floor_step_vo TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior ff1_w0_n ff1_w0_z ff1_w0_p trit_floor_step_ff TRIT_FLOOR_H HDIM * FFN
+        gpu qts_prior ff2_w0_n ff2_w0_z ff2_w0_p trit_floor_step_ff TRIT_FLOOR_H HFFN * DIM
+        gpu qts_prior wq1_n wq1_z wq1_p trit_floor_step_qk TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wk1_n wk1_z wk1_p trit_floor_step_qk TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wv1_n wv1_z wv1_p trit_floor_step_vo TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior wo1_n wo1_z wo1_p trit_floor_step_vo TRIT_FLOOR_H HDIM * DIM
+        gpu qts_prior ff1_w1_n ff1_w1_z ff1_w1_p trit_floor_step_ff TRIT_FLOOR_H HDIM * FFN
+        gpu qts_prior ff2_w1_n ff2_w1_z ff2_w1_p trit_floor_step_ff TRIT_FLOOR_H HFFN * DIM
         if n_samples % 500 == 0 {
-            emit "  [{n_samples}] loss={total_loss / n_samples}  lr={lr}"
+            emit "  [{n_samples}] train_loss={total_loss / n_samples}  lr={lr}"
+        }
+        ii = ii + 1
+    }
+    if stop_training == 1 {
+        emit "training stopped by user at epoch={ep + 1}, next_step={ii}, global_step={step_num}"
+        open_generation_prompt = 0
+        break
+    }
+    let train_avg_loss = total_loss / n_samples
+    if ep == 0 {
+        best_train_loss = train_avg_loss
+        best_train_epoch = ep + 1
+    }
+    if ep > 0 {
+        if train_avg_loss < best_train_loss {
+            best_train_loss = train_avg_loss
+            best_train_epoch = ep + 1
         }
     }
-    emit "epoch {ep + 1}/{EPOCHS}  avg_loss={total_loss / (n_samples + 1)}  samples={n_samples}"
+    let val_total_loss = 0.0
+    let val_samples = 0
+    cycle val_steps as vi {
+        let val_start = val_offset + vi * SEQ
+        cycle SEQ as t {
+            tokens^[t] = dataset^[t + val_start]
+            targets^[t] = dataset^[t + val_start + 1]
+        }
+        gpu embed_lookup hidden tok_emb tokens SEQ HDIM VOCAB
+        gpu pos_add hidden pos_emb SEQ HDIM
+        gpu copy residual hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln1_g0 ln1_b0 SEQ HDIM
+        gpu qts_forward3 Q Qy cn_q_L0 cz_q_L0 cp_q_L0 hidden wq0_n wq0_z wq0_p SEQ HDIM DIM
+        gpu qts_forward3 K Ky cn_k_L0 cz_k_L0 cp_k_L0 hidden wk0_n wk0_z wk0_p SEQ HDIM DIM
+        gpu qts_forward3 V Vy cn_v_L0 cz_v_L0 cp_v_L0 hidden wv0_n wv0_z wv0_p SEQ HDIM DIM
+        cycle SEQ * DIM as j {
+            Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
+            Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
+            Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
+        }
+        gpu causal_attention2 Q Qy K Ky V Vy attn_out attn_out_y SEQ DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                attn_pair^[dst + d] = attn_out^[src + d]
+                attn_pair^[dst + DIM + d] = attn_out_y^[src + d]
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_o_L0 cz_o_L0 cp_o_L0 attn_pair wo0_n wo0_z wo0_p SEQ HDIM DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                proj_out^[dst + d] = u_tmp_dim^[src + d]
+                proj_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + proj_out^[j]
+        }
+        gpu copy residual hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln2_g0 ln2_b0 SEQ HDIM
+        gpu qts_forward3 u_tmp_ffn v_tmp_ffn cn_ff1_L0 cz_ff1_L0 cp_ff1_L0 hidden ff1_w0_n ff1_w0_z ff1_w0_p SEQ HDIM FFN
+        gpu gelu u_tmp_ffn SEQ * FFN
+        cycle SEQ as t {
+            let src = t * FFN
+            let dst = t * HFFN
+            cycle FFN as d {
+                ff_mid^[dst + d] = u_tmp_ffn^[src + d]
+                ff_mid^[dst + FFN + d] = SIMPLEX_SQRT3 * v_tmp_ffn^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_ff2_L0 cz_ff2_L0 cp_ff2_L0 ff_mid ff2_w0_n ff2_w0_z ff2_w0_p SEQ HFFN DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                ff_out^[dst + d] = u_tmp_dim^[src + d]
+                ff_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + ff_out^[j]
+        }
+        gpu copy residual hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln1_g1 ln1_b1 SEQ HDIM
+        gpu qts_forward3 Q Qy cn_q_L1 cz_q_L1 cp_q_L1 hidden wq1_n wq1_z wq1_p SEQ HDIM DIM
+        gpu qts_forward3 K Ky cn_k_L1 cz_k_L1 cp_k_L1 hidden wk1_n wk1_z wk1_p SEQ HDIM DIM
+        gpu qts_forward3 V Vy cn_v_L1 cz_v_L1 cp_v_L1 hidden wv1_n wv1_z wv1_p SEQ HDIM DIM
+        cycle SEQ * DIM as j {
+            Qy^[j] = SIMPLEX_SQRT3 * Qy^[j] - SIMPLEX_INV_SQRT3
+            Ky^[j] = SIMPLEX_SQRT3 * Ky^[j] - SIMPLEX_INV_SQRT3
+            Vy^[j] = SIMPLEX_SQRT3 * Vy^[j] - SIMPLEX_INV_SQRT3
+        }
+        gpu causal_attention2 Q Qy K Ky V Vy attn_out attn_out_y SEQ DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                attn_pair^[dst + d] = attn_out^[src + d]
+                attn_pair^[dst + DIM + d] = attn_out_y^[src + d]
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_o_L1 cz_o_L1 cp_o_L1 attn_pair wo1_n wo1_z wo1_p SEQ HDIM DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                proj_out^[dst + d] = u_tmp_dim^[src + d]
+                proj_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + proj_out^[j]
+        }
+        gpu copy residual hidden SEQ * HDIM
+        gpu layernorm_batch hidden ln2_g1 ln2_b1 SEQ HDIM
+        gpu qts_forward3 u_tmp_ffn v_tmp_ffn cn_ff1_L1 cz_ff1_L1 cp_ff1_L1 hidden ff1_w1_n ff1_w1_z ff1_w1_p SEQ HDIM FFN
+        gpu gelu u_tmp_ffn SEQ * FFN
+        cycle SEQ as t {
+            let src = t * FFN
+            let dst = t * HFFN
+            cycle FFN as d {
+                ff_mid^[dst + d] = u_tmp_ffn^[src + d]
+                ff_mid^[dst + FFN + d] = SIMPLEX_SQRT3 * v_tmp_ffn^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        gpu qts_forward3 u_tmp_dim v_tmp_dim cn_ff2_L1 cz_ff2_L1 cp_ff2_L1 ff_mid ff2_w1_n ff2_w1_z ff2_w1_p SEQ HFFN DIM
+        cycle SEQ as t {
+            let src = t * DIM
+            let dst = t * HDIM
+            cycle DIM as d {
+                ff_out^[dst + d] = u_tmp_dim^[src + d]
+                ff_out^[dst + DIM + d] = SIMPLEX_SQRT3 * v_tmp_dim^[src + d] - SIMPLEX_INV_SQRT3
+            }
+        }
+        cycle SEQ * HDIM as j {
+            hidden^[j] = residual^[j] + ff_out^[j]
+        }
+        gpu layernorm_batch hidden ln_f_g ln_f_b SEQ HDIM
+        gpu forward logits hidden out_w out_b SEQ HDIM VOCAB
+        gpu celoss logits targets SEQ VOCAB
+        val_total_loss = val_total_loss + _sr_celoss
+        val_samples = val_samples + 1
+    }
+    let val_avg_loss = 0.0
+    if val_samples > 0 {
+        val_avg_loss = val_total_loss / val_samples
+    }
+    if ep == 0 {
+        best_val_loss = val_avg_loss
+        best_val_epoch = ep + 1
+    }
+    if ep > 0 {
+        if val_samples > 0 {
+            if val_avg_loss < best_val_loss {
+                best_val_loss = val_avg_loss
+                best_val_epoch = ep + 1
+            }
+        }
+    }
+    emit "epoch {ep + 1}/{EPOCHS}  train_avg_loss={train_avg_loss}  val_avg_loss={val_avg_loss}  train_steps={n_samples}  val_steps={val_samples}  best_train={best_train_loss}@{best_train_epoch}  best_val={best_val_loss}@{best_val_epoch}"
     #=======================
     # qts full health diagnostic
     # always log l1 ff1 & ff2, rest only every 10 epochs
@@ -945,6 +1483,14 @@ cycle EPOCHS as ep {
     gpu qts_diag ff1_w1_n ff1_w1_z ff1_w1_p HDIM * FFN
     emit "  [L1 ff2] (epoch {ep + 1})"
     gpu qts_diag ff2_w1_n ff2_w1_z ff2_w1_p HFFN * DIM
+    emit "  [L0 wv] (epoch {ep + 1})"
+    gpu qts_diag wv0_n wv0_z wv0_p HDIM * DIM
+    emit "  [L0 wo] (epoch {ep + 1})"
+    gpu qts_diag wo0_n wo0_z wo0_p HDIM * DIM
+    emit "  [L1 wv] (epoch {ep + 1})"
+    gpu qts_diag wv1_n wv1_z wv1_p HDIM * DIM
+    emit "  [L1 wo] (epoch {ep + 1})"
+    gpu qts_diag wo1_n wo1_z wo1_p HDIM * DIM
     if (ep + 1) % 10 == 0 {
         emit "qts diagnostic every 10 epochs (epoch {ep + 1}) ==="
         emit "  [L0 wq]"
@@ -968,31 +1514,33 @@ cycle EPOCHS as ep {
         emit "  [L1 wo]"
         gpu qts_diag wo1_n wo1_z wo1_p HDIM * DIM
     }
+    ep = ep + 1
 }
-emit "Enter text to get answer or write exit to get exit"
-emit ""
-let gen_buf = @f32[SEQ]
-str_from_bytes gen_result gen_buf 0
-let plen = 0
-let gen_pos = 0
-while 1 == 1 {
-    prompt q "> "
-    if q == "exit" {
-        break
-    }
-    if q == "" {
-        continue
-    }
-    str_bytes plen = str_bytes gen_buf q SEQ
-    if plen < 1 {
-        continue
-    }
-    gen_pos = plen
-    if gen_pos > 64 {
-        gen_pos = 64
-    }
-    let max_gen = SEQ - 1
-    cycle max_gen as step {
+if open_generation_prompt == 1 {
+    emit "Enter text to get answer or write exit to get exit"
+    emit ""
+    let gen_buf = @f32[SEQ]
+    str_from_bytes gen_result gen_buf 0
+    let plen = 0
+    let gen_pos = 0
+    while 1 == 1 {
+        prompt q "> "
+        if q == "exit" {
+            break
+        }
+        if q == "" {
+            continue
+        }
+        str_bytes plen = str_bytes gen_buf q SEQ
+        if plen < 1 {
+            continue
+        }
+        gen_pos = plen
+        if gen_pos > 64 {
+            gen_pos = 64
+        }
+        let max_gen = SEQ - 1
+        cycle max_gen as step {
         if gen_pos >= SEQ {
             break
         }
@@ -1232,5 +1780,6 @@ while 1 == 1 {
     str_from_bytes gen_result gen_buf gen_pos
     emit "{gen_result}"
     emit ""
+}
 }
 emit "bye!"
