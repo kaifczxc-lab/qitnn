@@ -16,6 +16,8 @@ Original Devlog: [Discord Devlog Thread GPU Mode](https://discord.com/channels/1
 
 Serenade Language Docs: [SERENADE_DOCS](https://github.com/kaifczxc-lab/Serenade-Language/blob/SiritoriProjects/Docs.md)
 
+PyQITNN: [PyTorch QITNN Custom Extension](https://pypi.org/project/pyqitnn/)
+
 ---
 
 ## What “quantum-inspired trit” means here
